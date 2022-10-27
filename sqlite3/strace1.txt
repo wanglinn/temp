@@ -1,0 +1,335 @@
+#0  open_db (p=p@entry=0x7fffffffd0e0, openFlags=openFlags@entry=0) at shell.c:16236
+#1  0x0000000000404365 in main (argc=3, argv=<optimized out>) at shell.c:23520
+(gdb) 
+
+
+
+#0  openDatabase (zFilename=zFilename@entry=0x7fffffffe6f0 "db1", ppDb=ppDb@entry=0x7fffffffd0e0, flags=6, zVfs=zVfs@entry=0x0)
+    at sqlite3.c:174130
+#1  0x00000000004bcfd5 in sqlite3_open_v2 (filename=filename@entry=0x7fffffffe6f0 "db1", ppDb=ppDb@entry=0x7fffffffd0e0, 
+    flags=<optimized out>, zVfs=zVfs@entry=0x0) at sqlite3.c:174469
+#2  0x000000000041ddd0 in open_db (p=p@entry=0x7fffffffd0e0, openFlags=openFlags@entry=0) at shell.c:16267
+#3  0x0000000000404365 in main (argc=3, argv=<optimized out>) at shell.c:23520
+
+
+
+#0  sqlite3FindCollSeq (db=db@entry=0x553030, enc=enc@entry=1 '\001', zName=zName@entry=0x524b9c <sqlite3StrBINARY> "BINARY", 
+    create=create@entry=0) at sqlite3.c:121233
+#1  0x0000000000467307 in sqlite3FindCollSeq (create=0, zName=0x524b9c <sqlite3StrBINARY> "BINARY", enc=1 '\001', db=0x553030)
+    at sqlite3.c:173685
+#2  createCollation (db=db@entry=0x553030, zName=zName@entry=0x524b9c <sqlite3StrBINARY> "BINARY", enc=enc@entry=1 '\001', 
+    pCtx=pCtx@entry=0x0, xCompare=xCompare@entry=0x42f800 <binCollFunc>, xDel=xDel@entry=0x0) at sqlite3.c:42613
+#3  0x00000000004bc9f9 in openDatabase (zFilename=zFilename@entry=0x7fffffffe6f0 "db1", ppDb=ppDb@entry=0x7fffffffd0e0,
+    flags=<optimized out>, zVfs=zVfs@entry=0x0) at sqlite3.c:174305
+#4  0x00000000004bcfd5 in sqlite3_open_v2 (filename=filename@entry=0x7fffffffe6f0 "db1", ppDb=ppDb@entry=0x7fffffffd0e0, 
+    flags=<optimized out>, zVfs=zVfs@entry=0x0) at sqlite3.c:174469
+#5  0x000000000041ddd0 in open_db (p=p@entry=0x7fffffffd0e0, openFlags=openFlags@entry=0) at shell.c:16267
+#6  0x0000000000404365 in main (argc=3, argv=<optimized out>) at shell.c:23520
+
+
+#0  sqlite3BtreeOpen (pVfs=0x5515c0 <aVfs.97>, zFilename=0x553584 "db1", db=db@entry=0x553030, ppBtree=0x5532d0, flags=flags@entry=0, 
+    vfsFlags=262) at sqlite3.c:69431
+#1  0x00000000004bcbd0 in openDatabase (zFilename=zFilename@entry=0x7fffffffe6f0 "db1", ppDb=ppDb@entry=0x7fffffffd0e0, 
+    flags=<optimized out>, zVfs=zVfs@entry=0x0) at sqlite3.c:174346
+#2  0x00000000004bcfd5 in sqlite3_open_v2 (filename=filename@entry=0x7fffffffe6f0 "db1", ppDb=ppDb@entry=0x7fffffffd0e0, 
+    flags=<optimized out>, zVfs=zVfs@entry=0x0) at sqlite3.c:174469
+#3  0x000000000041ddd0 in open_db (p=p@entry=0x7fffffffd0e0, openFlags=openFlags@entry=0) at shell.c:16267
+#4  0x0000000000404365 in main (argc=3, argv=<optimized out>) at shell.c:23520
+
+
+------------------------------------------------------
+
+drop table t1 ; 堆栈
+
+#0  sqlite3VdbeExec () at sqlite3.c:29524
+#1  0x00000000004c8d6f in sqlite3Step (p=0x7a49f0) at sqlite3.c:86887
+#2  sqlite3_step (pStmt=pStmt@entry=0x7a49f0) at sqlite3.c:21412
+#3  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a49f0) at shell.c:14835
+#4  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#5  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=16) at shell.c:22757
+#6  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#7  process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#8  0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+(gdb) 
+
+#0  sqlite3BtreeOpen (pVfs=0x5515c0 <aVfs.97>, zFilename=zFilename@entry=0x0, db=db@entry=0x799cd0, ppBtree=ppBtree@entry=0x7a4ea8, 
+    flags=5, vfsFlags=vfsFlags@entry=1054) at sqlite3.c:173517
+#1  0x00000000004bdebe in sqlite3VdbeExec () at sqlite3.c:92800
+#2  0x00000000004c8d6f in sqlite3Step (p=0x7a5800) at sqlite3.c:86887
+#3  sqlite3_step (pStmt=pStmt@entry=0x7a5800) at sqlite3.c:21412
+#4  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5800) at shell.c:14835
+#5  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#6  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=18) at shell.c:22757
+#7  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#8  process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#9  0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+#0  sqlite3BtreeBeginTrans (p=0x7bf4a0, wrflag=wrflag@entry=1, pSchemaVersion=pSchemaVersion@entry=0x0) at sqlite3.c:70482
+#1  0x00000000004bdeda in sqlite3VdbeExec () at sqlite3.c:92804
+#2  0x00000000004c8d6f in sqlite3Step (p=0x7a5800) at sqlite3.c:86887
+#3  sqlite3_step (pStmt=pStmt@entry=0x7a5800) at sqlite3.c:21412
+#4  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5800) at shell.c:14835
+#5  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#6  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=18) at shell.c:22757
+#7  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#8  process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#9  0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+
+#0  allocateCursor (p=p@entry=0x7a5800, iCur=1, nField=5, eCurType=eCurType@entry=0 '\000') at sqlite3.c:88791
+#1  0x00000000004bdcbf in sqlite3VdbeExec () at sqlite3.c:92667
+#2  0x00000000004c8d6f in sqlite3Step (p=0x7a5800) at sqlite3.c:86887
+#3  sqlite3_step (pStmt=pStmt@entry=0x7a5800) at sqlite3.c:21412
+#4  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5800) at shell.c:14835
+#5  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#6  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=18) at shell.c:22757
+#7  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#8  process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#9  0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+#0  sqlite3BtreeUpdateMeta (p=0x787150, idx=1, iMeta=6) at sqlite3.c:77036
+#1  0x00000000004bf008 in sqlite3VdbeExec () at sqlite3.c:92484
+#2  0x00000000004c8d6f in sqlite3Step (p=0x7a5800) at sqlite3.c:86887
+#3  sqlite3_step (pStmt=pStmt@entry=0x7a5800) at sqlite3.c:21412
+#4  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5800) at shell.c:14835
+#5  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#6  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=18) at shell.c:22757
+#7  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#8  process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#9  0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+(gdb) bt
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x000000000048a6e2 in sqlite3BtreeDelete (pCur=0x7a5898, flags=<optimized out>) at sqlite3.c:76508
+#2  0x00000000004bf82a in sqlite3VdbeExec () at sqlite3.c:94150
+#3  0x00000000004c8d6f in sqlite3Step (p=0x7a5350) at sqlite3.c:86887
+#4  sqlite3_step (pStmt=pStmt@entry=0x7a5350) at sqlite3.c:21412
+#5  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5350) at shell.c:14835
+#6  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#7  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=20) at shell.c:22757
+#8  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#9  process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#10 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+(gdb) bt
+#0  sqlite3PagerWrite (pPg=0x7bdc28) at sqlite3.c:60211
+#1  0x0000000000488733 in clearDatabasePage (pBt=pBt@entry=0x79a190, pgno=pgno@entry=2, freePageFlag=freePageFlag@entry=0, 
+    pnChange=<optimized out>, pnChange@entry=0x0) at sqlite3.c:76820
+#2  0x000000000048908d in sqlite3BtreeClearTable (p=p@entry=0x787150, iTable=iTable@entry=2, pnChange=pnChange@entry=0x0) at sqlite3.c:76856
+#3  0x00000000004c18f7 in btreeDropTable (piMoved=<synthetic pointer>, iTable=2, p=0x787150) at sqlite3.c:76903
+#4  sqlite3BtreeDropTable (piMoved=<synthetic pointer>, iTable=<optimized out>, p=0x787150) at sqlite3.c:11443
+#5  sqlite3VdbeExec () at sqlite3.c:29524
+#6  0x00000000004c8d6f in sqlite3Step (p=0x7a5350) at sqlite3.c:86887
+#7  sqlite3_step (pStmt=pStmt@entry=0x7a5350) at sqlite3.c:21412
+#8  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5350) at shell.c:14835
+#9  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#10 0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=20) at shell.c:22757
+#11 0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#12 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#13 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+(gdb) 
+
+(gdb) bt
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x00000000004858bd in freePage2 (pBt=0x79a190, pMemPage=0x7bdc70, iPage=2) at sqlite3.c:73575
+#2  0x00000000004c6c32 in freePage (pRC=<synthetic pointer>, pPage=<optimized out>) at sqlite3.c:73688
+#3  freePage (pRC=<synthetic pointer>, pPage=<optimized out>) at sqlite3.c:8150
+#4  btreeDropTable (piMoved=<synthetic pointer>, iTable=<optimized out>, p=0x787150) at sqlite3.c:11434
+#5  sqlite3BtreeDropTable (piMoved=<synthetic pointer>, iTable=<optimized out>, p=0x787150) at sqlite3.c:11443
+#6  sqlite3VdbeExec () at sqlite3.c:29524
+#7  0x00000000004c8d6f in sqlite3Step (p=0x7a5350) at sqlite3.c:86887
+#8  sqlite3_step (pStmt=pStmt@entry=0x7a5350) at sqlite3.c:21412
+#9  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5350) at shell.c:14835
+#10 0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#11 0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=20) at shell.c:22757
+#12 0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#13 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#14 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+#0  sqlite3PagerWrite (pPg=0x7bdc28) at sqlite3.c:60211
+#1  0x0000000000485918 in freePage2 (pBt=0x79a190, pMemPage=<optimized out>, iPage=2) at sqlite3.c:73669
+#2  0x00000000004c6c32 in freePage (pRC=<synthetic pointer>, pPage=<optimized out>) at sqlite3.c:73688
+#3  freePage (pRC=<synthetic pointer>, pPage=<optimized out>) at sqlite3.c:8150
+#4  btreeDropTable (piMoved=<synthetic pointer>, iTable=<optimized out>, p=0x787150) at sqlite3.c:11434
+#5  sqlite3BtreeDropTable (piMoved=<synthetic pointer>, iTable=<optimized out>, p=0x787150) at sqlite3.c:11443
+#6  sqlite3VdbeExec () at sqlite3.c:29524
+#7  0x00000000004c8d6f in sqlite3Step (p=0x7a5350) at sqlite3.c:86887
+#8  sqlite3_step (pStmt=pStmt@entry=0x7a5350) at sqlite3.c:21412
+#9  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5350) at shell.c:14835
+#10 0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#11 0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=20) at shell.c:22757
+#12 0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#13 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#14 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+#0  sqlite3PagerWrite (pPg=0x7d8880) at sqlite3.c:60211
+#1  0x0000000000483ebe in newDatabase (pBt=pBt@entry=0x7bf4e0) at sqlite3.c:70405
+#2  0x0000000000499f7d in newDatabase (pBt=0x7bf4e0) at sqlite3.c:70574
+#3  sqlite3BtreeBeginTrans (p=0x7bfd80, wrflag=wrflag@entry=1, pSchemaVersion=pSchemaVersion@entry=0x0) at sqlite3.c:5038
+#4  0x00000000004bdeda in sqlite3VdbeExec () at sqlite3.c:92804
+#5  0x00000000004c8d6f in sqlite3Step (p=0x7a5350) at sqlite3.c:86887
+#6  sqlite3_step (pStmt=pStmt@entry=0x7a5350) at sqlite3.c:21412
+#7  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5350) at shell.c:14835
+#8  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#9  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=20) at shell.c:22757
+#10 0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#11 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#12 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x0000000000483fa9 in sqlite3BtreeUpdateMeta (p=0x787150, idx=1, iMeta=8) at sqlite3.c:77044
+#2  0x00000000004bf008 in sqlite3VdbeExec () at sqlite3.c:92484
+#3  0x00000000004c8d6f in sqlite3Step (p=0x7a5350) at sqlite3.c:86887
+#4  sqlite3_step (pStmt=pStmt@entry=0x7a5350) at sqlite3.c:21412
+#5  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5350) at shell.c:14835
+#6  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#7  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=20) at shell.c:22757
+#8  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#9  process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#10 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x000000000049914a in pager_incr_changecounter (isDirectMode=0, pPager=0x79a640) at sqlite3.c:60334
+#2  sqlite3PagerCommitPhaseOne (noSync=0, zSuper=0x0, pPager=0x79a640) at sqlite3.c:60566
+#3  sqlite3PagerCommitPhaseOne (pPager=0x79a640, zSuper=0x0, noSync=0) at sqlite3.c:60441
+#4  0x0000000000499223 in sqlite3BtreeCommitPhaseOne (p=0x787150, zSuperJrnl=zSuperJrnl@entry=0x0) at sqlite3.c:71153
+#5  0x000000000049d48f in sqlite3BtreeCommitPhaseOne (zSuperJrnl=0x0, p=<optimized out>) at sqlite3.c:83675
+#6  vdbeCommit (p=0x7a5350, db=0x799cd0) at sqlite3.c:18139
+#7  sqlite3VdbeHalt (p=p@entry=0x7a5350) at sqlite3.c:18549
+#8  0x00000000004c7d46 in sqlite3VdbeExec () at sqlite3.c:89714
+#9  0x00000000004c8d6f in sqlite3Step (p=0x7a5350) at sqlite3.c:86887
+#10 sqlite3_step (pStmt=pStmt@entry=0x7a5350) at sqlite3.c:21412
+#11 0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7a5350) at shell.c:14835
+#12 0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#13 0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "drop table t1;", in=0x0, 
+    startline=startline@entry=20) at shell.c:22757
+#14 0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#15 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#16 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+
+-------------------------------  create table 堆栈
+creatre  table t1(id int);
+
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x0000000000484091 in allocateBtreePage (pBt=pBt@entry=0x79a190, ppPage=ppPage@entry=0x7ffd5fea5800, pPgno=pPgno@entry=0x7ffd5fea57f0, 
+    nearby=nearby@entry=1, eMode=eMode@entry=0 '\000') at sqlite3.c:73286
+#2  0x00000000004895d2 in btreeCreateTable (p=p@entry=0x787150, piTable=piTable@entry=0x7ffd5fea5970, createTabFlags=1) at sqlite3.c:76746
+#3  0x00000000004c1d28 in sqlite3BtreeCreateTable (flags=<optimized out>, piTable=0x7ffd5fea5970, p=0x787150) at sqlite3.c:76765
+#4  sqlite3VdbeExec () at sqlite3.c:29624
+#5  0x00000000004c8d6f in sqlite3Step (p=0x7c0080) at sqlite3.c:86887
+#6  sqlite3_step (pStmt=pStmt@entry=0x7c0080) at sqlite3.c:21412
+#7  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7c0080) at shell.c:14835
+#8  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#9  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", in=0x0, 
+    startline=startline@entry=19) at shell.c:22757
+#10 0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#11 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#12 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+(gdb) bt
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x0000000000485f81 in insertCell (pPage=pPage@entry=0x7bed78, i=i@entry=0, pCell=pCell@entry=0x7c0334 "\006\001\006", sz=sz@entry=8, 
+    pTemp=pTemp@entry=0x0, iChild=iChild@entry=0, pRC=0x7ffd5fea57d0) at sqlite3.c:74085
+#2  0x000000000048b83a in sqlite3BtreeInsert (pCur=<optimized out>, pX=pX@entry=0x7ffd5fea5970, flags=8, seekResult=<optimized out>)
+    at sqlite3.c:76221
+#3  0x00000000004bfc6a in sqlite3VdbeExec () at sqlite3.c:93986
+#4  0x00000000004c8d6f in sqlite3Step (p=0x7c0080) at sqlite3.c:86887
+#5  sqlite3_step (pStmt=pStmt@entry=0x7c0080) at sqlite3.c:21412
+#6  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7c0080) at shell.c:14835
+#7  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#8  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", in=0x0, 
+    startline=startline@entry=19) at shell.c:22757
+#9  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#10 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#11 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+(gdb) bt
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x0000000000485f81 in insertCell (pPage=pPage@entry=0x7bed78, i=i@entry=0, 
+    pCell=pCell@entry=0x7c0334 "'\001\006\027\021\021\001;tablet1t1\002CREATE TABLE t1(id int)", sz=sz@entry=41, pTemp=pTemp@entry=0x0, 
+    iChild=iChild@entry=0, pRC=0x7ffd5fea57d0) at sqlite3.c:74085
+#2  0x000000000048b83a in sqlite3BtreeInsert (pCur=<optimized out>, pX=pX@entry=0x7ffd5fea5970, flags=0, seekResult=<optimized out>)
+    at sqlite3.c:76221
+#3  0x00000000004bfc6a in sqlite3VdbeExec () at sqlite3.c:93986
+#4  0x00000000004c8d6f in sqlite3Step (p=0x7c0080) at sqlite3.c:86887
+#5  sqlite3_step (pStmt=pStmt@entry=0x7c0080) at sqlite3.c:21412
+#6  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7c0080) at shell.c:14835
+#7  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#8  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", in=0x0, 
+    startline=startline@entry=19) at shell.c:22757
+#9  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#10 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#11 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+(gdb) bt
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x0000000000483fa9 in sqlite3BtreeUpdateMeta (p=0x787150, idx=1, iMeta=7) at sqlite3.c:77044
+#2  0x00000000004bf008 in sqlite3VdbeExec () at sqlite3.c:92484
+#3  0x00000000004c8d6f in sqlite3Step (p=0x7c0080) at sqlite3.c:86887
+#4  sqlite3_step (pStmt=pStmt@entry=0x7c0080) at sqlite3.c:21412
+#5  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7c0080) at shell.c:14835
+#6  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#7  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", in=0x0, 
+    startline=startline@entry=19) at shell.c:22757
+#8  0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#9  process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#10 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+#0  sqlite3PagerWrite (pPg=0x7bed30) at sqlite3.c:60211
+#1  0x000000000049914a in pager_incr_changecounter (isDirectMode=0, pPager=0x79a640) at sqlite3.c:60334
+#2  sqlite3PagerCommitPhaseOne (noSync=0, zSuper=0x0, pPager=0x79a640) at sqlite3.c:60566
+#3  sqlite3PagerCommitPhaseOne (pPager=0x79a640, zSuper=0x0, noSync=0) at sqlite3.c:60441
+#4  0x0000000000499223 in sqlite3BtreeCommitPhaseOne (p=0x787150, zSuperJrnl=zSuperJrnl@entry=0x0) at sqlite3.c:71153
+#5  0x000000000049d48f in sqlite3BtreeCommitPhaseOne (zSuperJrnl=0x0, p=<optimized out>) at sqlite3.c:83675
+#6  vdbeCommit (p=0x7c0080, db=0x799cd0) at sqlite3.c:18139
+#7  sqlite3VdbeHalt (p=p@entry=0x7c0080) at sqlite3.c:18549
+#8  0x00000000004c7d46 in sqlite3VdbeExec () at sqlite3.c:89714
+#9  0x00000000004c8d6f in sqlite3Step (p=0x7c0080) at sqlite3.c:86887
+#10 sqlite3_step (pStmt=pStmt@entry=0x7c0080) at sqlite3.c:21412
+#11 0x00000000004168f3 in exec_prepared_stmt (pArg=0x7ffd5fea65b0, pStmt=0x7c0080) at shell.c:14835
+#12 0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", 
+    pzErrMsg=pzErrMsg@entry=0x7ffd5fea5cf8) at shell.c:15151
+#13 0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7ffd5fea65b0, zSql=zSql@entry=0x7a9660 "create table t1(id int);", in=0x0, 
+    startline=startline@entry=19) at shell.c:22757
+#14 0x00000000004294af in process_input (p=0x7ffd5fea65b0) at shell.c:22921
+#15 process_input (p=0x7ffd5fea65b0) at shell.c:22842
+#16 0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+(gdb) 
+
