@@ -1,0 +1,296 @@
+createTableStmt
+
+
+sqlite3EndTable
+
+sqlite3BtreeCreateTable
+
+
+#0  sqlite3VdbeExec () at sqlite3.c:29624
+#1  0x00000000004c8d6f in sqlite3Step (p=0x1d084e0) at sqlite3.c:86887
+#2  sqlite3_step (pStmt=pStmt@entry=0x1d084e0) at sqlite3.c:21412
+#3  0x00000000004168f3 in exec_prepared_stmt (pArg=0x7fff1ce6fe40, pStmt=0x1d084e0) at shell.c:14835
+#4  0x000000000041ca85 in shell_exec (pArg=pArg@entry=0x7fff1ce6fe40, zSql=zSql@entry=0x1cf2d30 "create table t101(id int);", pzErrMsg=pzErrMsg@entry=0x7fff1ce6f588)
+    at shell.c:15151
+#5  0x000000000041e0e0 in runOneSqlLine (p=p@entry=0x7fff1ce6fe40, zSql=zSql@entry=0x1cf2d30 "create table t101(id int);", in=0x0, startline=startline@entry=4) at shell.c:22757
+#6  0x00000000004294af in process_input (p=0x7fff1ce6fe40) at shell.c:22921
+#7  process_input (p=0x7fff1ce6fe40) at shell.c:22842
+#8  0x0000000000404507 in main (argc=<optimized out>, argv=<optimized out>) at shell.c:23767
+
+
+sqlite3BtreeCursor
+
+
+-- 跟踪
+btreeLockCarefully (p=0x2372aa0) at sqlite3.c:66796
+
+
+sqlite3BeginBenignMalloc  sqlite3.c:25172
+
+sqlite3EndBenignMalloc();
+
+
+case OP_Transaction:
+
+
+#0  sqlite3BtreeBeginTrans (p=0x2372aa0, wrflag=1, pSchemaVersion=0x7ffee902856c) at sqlite3.c:70482
+
+
+#0  querySharedCacheTableLock (p=0x2372aa0, iTab=1, eLock=1 '\001') at sqlite3.c:67282
+
+
+#0  sqlite3PagerBegin (pPager=0x2372fb0, exFlag=0, subjInMemory=0) at sqlite3.c:59899
+#1  0x000000000047043c in sqlite3BtreeBeginTrans (p=0x2372aa0, wrflag=1, pSchemaVersion=0x7ffee902856c) at sqlite3.c:70572
+#2  0x00000000004a0131 in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:92351
+#3  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#4  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#5  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#6  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#7  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#8  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#9  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+pagerLockDb
+
+
+#0  newDatabase (pBt=0x2372b00) at sqlite3.c:70399
+#1  0x0000000000470451 in sqlite3BtreeBeginTrans (p=0x2372aa0, wrflag=1, pSchemaVersion=0x7ffee902856c) at sqlite3.c:70574
+#2  0x00000000004a0131 in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:92351
+#3  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#4  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#5  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#6  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#7  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#8  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#9  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+#0  sqlite3PagerOpenSavepoint (pPager=0x2372fb0, nSavepoint=0) at sqlite3.c:60935
+#1  0x00000000004706a3 in sqlite3BtreeBeginTrans (p=0x2372aa0, wrflag=1, pSchemaVersion=0x7ffee902856c) at sqlite3.c:70645
+#2  0x00000000004a0131 in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:92351
+#3  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#4  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#5  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#6  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#7  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#8  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#9  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+
+
+ case OP_TableLock: {   
+ 
+ 
+ #0  sqlite3BtreeLockTable (p=0x2372aa0, iTab=1, isWriteLock=1 '\001') at sqlite3.c:77928
+ 
+ case OP_ReadCookie: 
+ 
+ #0  sqlite3BtreeGetMeta (p=0x2372aa0, idx=2, pMeta=0x7ffee9028568) at sqlite3.c:77006
+#1  0x00000000004a05bd in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:92451
+#2  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#3  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#4  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#5  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#6  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#7  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#8  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+case OP_If:
+	sqlite3VdbeBooleanValue
+
+
+
+ case OP_CreateBtree:
+ 
+ #0  sqlite3BtreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, flags=1) at sqlite3.c:76764
+#1  0x00000000004a719a in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:95160
+#2  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#3  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#4  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#5  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#6  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#7  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#8  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+#0  btreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, createTabFlags=1) at sqlite3.c:76634
+#1  0x000000000047f4e2 in sqlite3BtreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, flags=1) at sqlite3.c:76765
+#2  0x00000000004a719a in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:95160
+#3  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#4  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#5  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#6  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#7  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#8  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#9  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+#0  allocateBtreePage (pBt=0x2372b00, ppPage=0x7ffee90283e8, pPgno=0x7ffee90283e4, nearby=1, eMode=0 '\000') at sqlite3.c:73241
+#1  0x000000000047f3f0 in btreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, createTabFlags=1) at sqlite3.c:76746
+#2  0x000000000047f4e2 in sqlite3BtreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, flags=1) at sqlite3.c:76765
+#3  0x00000000004a719a in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:95160
+#4  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#5  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#6  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#7  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#8  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#9  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#10 0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+#0  sqlite3PagerWrite (pPg=0x2397770) at sqlite3.c:60211
+#1  0x00000000004762c5 in allocateBtreePage (pBt=0x2372b00, ppPage=0x7ffee90283e8, pPgno=0x7ffee90283e4, nearby=1, eMode=0 '\000') at sqlite3.c:73286
+#2  0x000000000047f3f0 in btreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, createTabFlags=1) at sqlite3.c:76746
+#3  0x000000000047f4e2 in sqlite3BtreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, flags=1) at sqlite3.c:76765
+#4  0x00000000004a719a in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:95160
+#5  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#6  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#7  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#8  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#9  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#10 0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#11 0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+pager_write
+
+#0  sqlite3PagerWrite (pPg=0x2396668) at sqlite3.c:60211
+#1  0x0000000000476452 in allocateBtreePage (pBt=0x2372b00, ppPage=0x7ffee90283e8, pPgno=0x7ffee90283e4, nearby=1, eMode=0 '\000') at sqlite3.c:73328
+#2  0x000000000047f3f0 in btreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, createTabFlags=1) at sqlite3.c:76746
+#3  0x000000000047f4e2 in sqlite3BtreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, flags=1) at sqlite3.c:76765
+#4  0x00000000004a719a in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:95160
+#5  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#6  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#7  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#8  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#9  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#10 0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#11 0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+(gdb) 
+
+
+#0  pagerAddPageToRollbackJournal (pPg=0x2396668) at sqlite3.c:59995
+#1  0x000000000045ff41 in pager_write (pPg=0x2396668) at sqlite3.c:60070
+#2  0x0000000000460463 in sqlite3PagerWrite (pPg=0x2396668) at sqlite3.c:60224
+#3  0x0000000000476452 in allocateBtreePage (pBt=0x2372b00, ppPage=0x7ffee90283e8, pPgno=0x7ffee90283e4, nearby=1, eMode=0 '\000') at sqlite3.c:73328
+#4  0x000000000047f3f0 in btreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, createTabFlags=1) at sqlite3.c:76746
+#5  0x000000000047f4e2 in sqlite3BtreeCreateTable (p=0x2372aa0, piTable=0x7ffee9028514, flags=1) at sqlite3.c:76765
+#6  0x00000000004a719a in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:95160
+#7  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#8  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#9  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#10 0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#11 0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#12 0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#13 0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+case OP_OpenRead: 
+case OP_OpenWrite:
+
+(gdb) bt
+#0  btreeCursorWithLock (p=0x2372aa0, iTable=1, wrFlag=4, pKeyInfo=0x0, pCur=0x237e2f0) at sqlite3.c:71587
+#1  0x0000000000472455 in sqlite3BtreeCursor (p=0x2372aa0, iTable=1, wrFlag=4, pKeyInfo=0x0, pCur=0x237e2f0) at sqlite3.c:71600
+#2  0x00000000004a0ee6 in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:92676
+#3  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#4  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#5  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#6  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#7  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#8  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#9  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+#0  sqlite3BtreeInsert (pCur=0x237e2f0, pX=0x7ffee9028490, flags=8, seekResult=0) at sqlite3.c:75986
+#1  0x00000000004a40cd in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:93986
+#2  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#3  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#4  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#5  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#6  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#7  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#8  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+sqlite3BtreeTableMoveto
+
+
+(gdb) bt
+#0  fillInCell (pPage=0x23977b8, pCell=0x2398e84 "", pX=0x7ffee9028490, pnSize=0x7ffee90283fc) at sqlite3.c:73818
+#1  0x000000000047dba4 in sqlite3BtreeInsert (pCur=0x237e2f0, pX=0x7ffee9028490, flags=8, seekResult=0) at sqlite3.c:76167
+#2  0x00000000004a40cd in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:93986
+#3  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#4  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#5  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#6  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#7  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#8  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#9  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+case OP_Close:
+
+#0  sqlite3BtreeCloseCursor (pCur=0x237e2f0) at sqlite3.c:71635
+#1  0x000000000048d577 in sqlite3VdbeFreeCursorNN (p=0x2399e90, pCx=0x237e250) at sqlite3.c:83445
+#2  0x000000000048d4ee in sqlite3VdbeFreeCursor (p=0x2399e90, pCx=0x237e250) at sqlite3.c:83435
+#3  0x00000000004a1980 in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:92926
+#4  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#5  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#6  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#7  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#8  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#9  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#10 0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+case OP_BeginSubrtn: 
+case OP_Null: {
+
+
+case OP_OpenRead: 
+case OP_OpenWrite: 
+
+
+case OP_ReleaseReg
+
+ case OP_SeekRowid:
+ 
+ case OP_Rowid:
+ 
+  case OP_Insert
+  
+#0  sqlite3BtreeInsert (pCur=0x237d990, pX=0x7ffee9028490, flags=0, seekResult=0) at sqlite3.c:75987
+#1  0x00000000004a40cd in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:93986
+#2  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#3  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#4  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#5  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#6  0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#7  0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#8  0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
+
+
+(gdb) p zSql
+$26 = 0x237f600 "SELECT*FROM\"main\".sqlite_master WHERE tbl_name='t101' AND type!='trigger' ORDER BY rowid"
+
+
+case OP_Transaction:
+
+(gdb) bt
+#0  sqlite3BtreeBeginTrans (p=0x2372aa0, wrflag=0, pSchemaVersion=0x7ffee9027a9c) at sqlite3.c:70483
+#1  0x00000000004a0131 in sqlite3VdbeExec (p=0x237d440) at sqlite3.c:92351
+#2  0x000000000049442b in sqlite3Step (p=0x237d440) at sqlite3.c:86887
+#3  0x0000000000494779 in sqlite3_step (pStmt=0x237d440) at sqlite3.c:86948
+#4  0x00000000004f0cf5 in sqlite3_exec (db=0x23726d0, zSql=0x237f600 "SELECT*FROM\"main\".sqlite_master WHERE tbl_name='t101' AND type!='trigger' ORDER BY rowid", 
+    xCallback=0x4f86ab <sqlite3InitCallback>, pArg=0x7ffee9028490, pzErrMsg=0x0) at sqlite3.c:129704
+#5  0x00000000004a7592 in sqlite3VdbeExec (p=0x2399e90) at sqlite3.c:95237
+#6  0x000000000049442b in sqlite3Step (p=0x2399e90) at sqlite3.c:86887
+#7  0x0000000000494779 in sqlite3_step (pStmt=0x2399e90) at sqlite3.c:86948
+#8  0x000000000042036b in exec_prepared_stmt (pArg=0x7ffee90298e0, pStmt=0x2399e90) at shell.c:14835
+#9  0x00000000004210a7 in shell_exec (pArg=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", pzErrMsg=0x7ffee9029840) at shell.c:15151
+#10 0x00000000004348af in runOneSqlLine (p=0x7ffee90298e0, zSql=0x2382100 "create table t101(id int);", in=0x0, startline=3) at shell.c:22757
+#11 0x0000000000434ece in process_input (p=0x7ffee90298e0) at shell.c:22921
+#12 0x0000000000436c7d in main (argc=1, argv=0x7ffee902acd8) at shell.c:23767
