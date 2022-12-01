@@ -1,0 +1,30 @@
+https://db-blog.web.cern.ch/blog/szymon-skorupinski/2014-06-unified-auditing-performance
+
+https://dontcheff1.rssing.com/chan-8695561/latest.php
+
+
+Submitted by sskorupi on Wed, 06/25/2014 - 15:35
+Blog article:
+In my previous blog post (http://db-blog.web.cern.ch/blog/szymon-skorupinski/2014-05-migrating-oracle-database-12c-what-do-auditing) I provided you with number of reasons why unified auditing looks very promising and should be seriously considered while migrating to 12c. Nonetheless, I was not talking at all about performance – which also seems to be greatly improved.
+
+Main source of the improvement is related to the possibility of writing audit records asynchronously. It is enabled by introducing queued audit write mode, as another option to immediate write mode. The latter (not surprisingly) causes audit records to be written into the audit trail immediately. In queued write mode, which is enabled by default, audit entries are put in queue located in SGA and then persisted from there in batches. The size of this queue could be controlled by DBA, using UNIFIED_AUDIT_SGA_QUEUE_SIZE parameter (by default set to 1 MB, could be resized up to 30 MB). Drawback of this approach is the possibility of loosing some audit records kept in memory and not yet written to disk, in case of instance crash. Minimum flush threshold is configured to 3 seconds (default setting of _UNIFIED_AUDIT_FLUSH_INTERVAL parameter), but depending on database activity, flush may not happen every 3 seconds and could take longer, so in heavily loaded databases, the amount of lost audit records could be significant. The other related underscore parameter is _UNIFIED_AUDIT_FLUSH_THRESHOLD, which probably defines percentage of queue size defined by UNIFIED_AUDIT_SGA_QUEUE_SIZE, exceeding which also triggers such flush. There is also manual possibility to invoke it, by running (in this example requesting on all RAC instances): 
+
+
+SQL> exec dbms_audit_mgmt.flush_unified_audit_trail(dbms_audit_mgmt.flush_all_instances);
+
+Knowing how asynchronous operations are helping to achieve better performance, I was pretty sure that performance gain would be considerable. But I’ve decided to test how big it could be. For doing that, I’ve taken 3 workloads recorded in our 11g databases and used another 12c new feature – Consolidated Database Replay, which allowed me to run all 3 workloads in parallel.  They were replayed on 2-node RAC cluster, running Oracle 12.1.0.1.0 binaries, with clients running from the third machine, not to influence the results. To generate as much audit records as possible I used such an auditing policy:
+
+
+SQL> create audit policy all_actions_pol actions all;
+SQL> audit policy all_actions_pol;
+
+It allowed me to generate over 460 000 records per test, with less than 1% difference between them. I’ve run three tests, each lasting 1 hour, using different unified auditing settings described below:
+
+Immediate write mode.
+Queued write mode with UNIFIED_AUDIT_SGA_QUEUE_SIZE set to 1 MB.
+Queued write mode with UNIFIED_AUDIT_SGA_QUEUE_SIZE set to 10 MB.
+Even though the number of audit records generated during each test was similar, there was a big difference in DB Time - queued write mode took around 35% less of DB Time comparing to immediate write mode. On the other hand, difference between tests with 1 and 10 MB SGA queue sizes was negligible.
+
+
+
+
