@@ -1,0 +1,200 @@
+#1 oracle管道函数的用法
+
+https://blog.csdn.net/weixin_28940363/article/details/116385542
+
+
+oracle管道函数是一类特殊的函数，oracle管道函数返回值类型必须为集合。
+
+在普通的函数中，使用dbms_output输出的信息，需要在服务器执行完整个函数后一次性的返回给客户端。如果
+需要在客户端实时的输出函数执行过程中的一些信息，在oracle9i以后可以使用管道函数(pipeline function)。
+
+关键字PIPELINED表明这是一个oracle管道函数，oracle管道函数的返回值类型必须为集合，在函数中，PIPE 
+ROW语句被用来返回该集合的单个元素，函数以一个空的RETURN 语句结束，以表明它已经完成。
+
+#2 测试用力
+
+create user c##u101 identified by test;
+grant connect to c##u101;
+grant dba to c##u101;
+grant execute on dbms_lock to c##u101;
+
+-- testcase1 pipelined 函数简单使用
+
+create or replace type MsgType as table of varchar2(4000);
+/
+
+
+create or replace function f_pipeline_test
+
+return MsgType
+
+PIPELINED
+
+as
+
+begin
+
+for i in 1 .. 10
+
+loop
+
+pipe row( 'Iteration ' || i || ' at ' || systimestamp );
+
+dbms_lock.sleep(1);
+
+end loop;
+
+pipe row( 'All done!' );
+
+return;
+
+end;
+
+/
+
+在sql*plus中执行该函数，首先设置arraysize为1，否则服务器会按照默认的15来向客户端返回信息，这会影响我们的测试效果。
+
+set arraysize 1
+select * from table( f_pipeline_test );
+
+执行结果
+COLUMN_VALUE
+--------------------------------------------------------------------------------
+Iteration 1 at 09-4月 -23 09.34.47.723000000 上午 +08:00
+Iteration 2 at 09-4月 -23 09.34.48.732000000 上午 +08:00
+Iteration 3 at 09-4月 -23 09.34.49.738000000 上午 +08:00
+Iteration 4 at 09-4月 -23 09.34.50.744000000 上午 +08:00
+Iteration 5 at 09-4月 -23 09.34.51.751000000 上午 +08:00
+Iteration 6 at 09-4月 -23 09.34.52.752000000 上午 +08:00
+Iteration 7 at 09-4月 -23 09.34.53.754000000 上午 +08:00
+Iteration 8 at 09-4月 -23 09.34.54.755000000 上午 +08:00
+Iteration 9 at 09-4月 -23 09.34.55.757000000 上午 +08:00
+Iteration 10 at 09-4月 -23 09.34.56.757000000 上午 +08:00
+All done!
+
+已选择 11 行。
+
+
+-- testcase2 如果要在pipeline中执行DML操作，则必须使用自治事务，否则报错
+
+create or replace function f_pipeline_testdml
+
+return MsgType
+
+PIPELINED
+
+as
+
+begin
+
+for i in 1 .. 10
+
+loop
+
+insert into test values(1);
+
+pipe row( 'insert into test values( ' || i || ') success at ' || systimestamp );
+
+dbms_lock.sleep(1);
+
+end loop;
+
+pipe row( 'All done!' );
+
+return;
+
+end;
+
+/
+
+
+select * from table( f_pipeline_testdml );
+
+执行结果：
+                    *
+第 1 行出现错误:
+ORA-14551: 无法在查询中执行 DML 操作
+ORA-06512: 在 "C##U101.F_PIPELINE_TESTDML", line 15
+
+查看资料：
+数据库事务是一种单元操作，要么是全部操作都成功，要么全部失败。在Oracle中，一个事务是从执行第一个数据管理语言（DML）语句开始，直到执行一个COMMIT语句，提交保存这个事务，或者执行一个ROLLBACK语句，放弃此次操作结束。
+
+事务的“要么全部完成，要么什么都没完成”的本性会使将错误信息记入数据库表中变得很困难，因为当事务失败重新运行时，用来编写日志条目的INSERT语句还未完成。
+
+针对这种困境，Oracle提供了一种便捷的方法，即自治事务。自治事务从当前事务开始，在其自身的语境中执行。它们能独立地被提交或重新运行，而不影响正在运行的事务。正因为这样，它们成了编写错误日志表格的理想形式。在事务中检测到错误时，您可以在错误日志表格中插入一行并提交它，然后在不丢失这次插入的情况下回滚主事务。
+
+因为自治事务是与主事务相分离的，所以它不能检测到被修改过的行的当前状态。这就好像在主事务提交之前，它们一直处于单独的会话里，对自治事务来说，它们是不可用的。然而，反过来情况就不同了：主事务能够检测到已经执行过的自治事务的结果。
+
+要创建一个自治事务，您必须在匿名块的最高层或者存储过程、函数、数据包或触发的定义部分中，使用PL/SQL中的PRAGMA AUTONOMOUS_TRANSACTION语句。在这样的模块或过程中执行的SQL Server语句都是自治的。
+
+触发无法包含COMMIT语句，除非有PRAGMA AUTONOMOUS_TRANSACTION标记。但是，只有触发中的语句才能被提交，主事务则不行。
+---------
+原文链接：https://blog.csdn.net/qq_27052085/article/details/85341020
+
+添加自治事务
+
+create or replace function f_pipeline_testdml
+
+return MsgType
+
+PIPELINED
+
+as
+
+pragma autonomous_transaction;
+
+begin
+
+for i in 1 .. 10
+
+loop
+
+insert into test values(1);
+
+commit;
+
+pipe row( 'insert into test values( ' || i || ') success at ' || systimestamp );
+
+dbms_lock.sleep(1);
+
+end loop;
+
+pipe row( 'All done!' );
+
+return;
+
+end;
+
+/
+
+执行 select * from table( f_pipeline_testdml );
+结果
+
+COLUMN_VALUE
+--------------------------------------------------------------------------------
+insert into test values( 1) success at 09-4月 -23 09.43.26.157000000 上午 +08:00
+insert into test values( 2) success at 09-4月 -23 09.43.27.171000000 上午 +08:00
+insert into test values( 3) success at 09-4月 -23 09.43.28.179000000 上午 +08:00
+insert into test values( 4) success at 09-4月 -23 09.43.29.185000000 上午 +08:00
+insert into test values( 5) success at 09-4月 -23 09.43.30.189000000 上午 +08:00
+insert into test values( 6) success at 09-4月 -23 09.43.31.188000000 上午 +08:00
+insert into test values( 7) success at 09-4月 -23 09.43.32.193000000 上午 +08:00
+insert into test values( 8) success at 09-4月 -23 09.43.33.194000000 上午 +08:00
+insert into test values( 9) success at 09-4月 -23 09.43.34.196000000 上午 +08:00
+insert into test values( 10) success at 09-4月 -23 09.43.35.201000000 上午 +08:0
+0
+
+COLUMN_VALUE
+--------------------------------------------------------------------------------
+
+All done!
+
+已选择 11 行。
+
+在oracle9205及其之后的版本中，在pipeline function中使用自治事务，则必须在pipe row之前提交或者回滚事务，否则会报ORA-06519错误
+::
+第 1 行出现错误:
+ORA-06519: 检测到活动的独立的事务处理, 已经回退
+ORA-06512: 在 "C##U101.F_PIPELINE_TESTDML", line 21
+
+
