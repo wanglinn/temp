@@ -1,0 +1,299 @@
+参考：Oracle中游标Cursor的用法详解 https://www.jb51.net/article/246922.htm
+
+# 关闭游标
+close cursor_name;
+
+# 游标属性
+
+用于返回显示游标的执行信息,包括%isopen,%found,%notfound,%rowcount
+
+%isopen:确定游标是否打开
+%found:检查是否从结果集中提取到了数据
+%notfound:与%found行为相反。
+%rowcount:返回当前行为止已经提取到的实际行数
+no_data_found和%notfound的用法是有区别的，小结如下1)SELECT. . . INTO 语句触发 no_data_found；
+2)当一个显式光标(静态和动态)的 where 子句未找到时触发 %notfound；
+3)当UPDATE或DELETE语句的where 子句未找到时触发 sql%notfound；
+4)在光标的提取(Fetch)循环中要用 %notfound 或%found 来确定循环的退出条件，不要用no_data_found。
+
+# 隐式游标
+
+使用FOR循环时,ORACLE会隐含的打开游标,提取游标数据并关闭游标。
+
+每循环一次提取一次数据，在提取了所有数据后,自动退出循环并隐含的关闭游标。
+
+# 使用游标更新或删除数据
+
+要通过游标更新或删除数据,在定义游标时必须要带有FOR UPDATE子句
+
+cursor cursor_name(parameter_name datetype) is select_statement for update [of column_reference] [nowait];
+
+for update子句：用于在游标结果集数据上家行共享锁,防止其他用户在相应行执行DML操作
+of子句：确定哪些表要加锁,没有OF子句,则在所引用的全部表上加锁
+nowait子句：用于指定不等待锁
+必须在UPDATE后DELETE语句中引用WHERE CURRENT OF子句
+
+declare
+    cursor emp_cursor is select ename,sal from emp for update;
+    v_ename emp.ename%type;
+    v_oldsal emp.sal%type;
+  begin
+    open emp_cursor;
+    loop
+     fetch emp_cursor into v_ename,v_oldsal;
+     exit when emp_cursor%notfound;
+     if v_oldsal<2000 then
+        update emp set sal=sal+100 where current of emp_cursor; --delete from emp where current of emp_cursor;
+     end if;
+   end loop;
+   close emp_cursor;
+ end;
+/
+
+
+#1 游标示例
+
+--testcase1
+
+drop table emp;
+create table emp(deptno int, ename varchar(20), sal int);
+insert into emp values(1,'a1', 1000);
+insert into emp values(2,'a2', 2000);
+insert into emp values(3,'a3', 3000);
+insert into emp values(4,'a4', 4000);
+
+set serveroutput on;
+
+
+declare
+    type emp_cursor_type is ref cursor;
+    emp_cursor emp_cursor_type;
+    emp_record emp%rowtype;
+  begin
+    open emp_cursor for select * from emp;
+    loop
+     fetch emp_cursor into emp_record;
+     exit when emp_cursor%notfound;
+     dbms_output.put_line('第'||emp_cursor%rowcount||'个雇员: '||emp_record.ename);
+    end loop;
+    close emp_cursor;
+  end;
+
+执行结果：
+
+第1个雇员: a1
+第2个雇员: a2
+第3个雇员: a3
+第4个雇员: a4
+
+PL/SQL 过程已成功完成。
+
+
+--testcase2
+
+drop table book;
+create table book(id int, bookname varchar(20));
+insert into book values(1, 'a1');
+insert into book values(2, 'a2');
+insert into book values(3, 'a3');
+insert into book values(4, 'a4');
+
+set serveroutput on;
+
+declare
+	v_bookname varchar2(100);
+	cursor c_book(i_id number) is select bookname from book where id < i_id;
+	begin
+        Open c_book(10);--打开游标
+        Loop
+            Fetch c_book into v_bookname; --提取游标
+            exit when c_book%notfound;
+			dbms_output.put_line('bookname = ' || v_bookname);
+        End Loop;
+        Close c_book;--关闭游标
+    end;
+/
+
+执行结果：
+
+bookname = a1
+bookname = a2
+bookname = a3
+bookname = a4
+
+PL/SQL 过程已成功完成。
+
+--testcase3
+
+declare
+    cursor emp_cursor is select ename from emp;
+    emp_record emp_cursor%rowtype;
+  begin
+    open emp_cursor;
+    loop
+     fetch emp_cursor into emp_record;
+     exit when emp_cursor%notfound;
+     dbms_output.put_line('雇员名:'||emp_record.ename);
+    end loop;
+ end;
+/
+
+执行结果：
+
+雇员名:a1
+雇员名:a2
+雇员名:a3
+雇员名:a4
+
+PL/SQL 过程已成功完成。
+
+-- testcase4
+--不需要声明v_bookname,Open和Close游标和fetch操作(不用打开游标和关闭游标，实现遍历游
+
+declare
+ cursor c_book(i_id number) is select bookname from book where id < i_id;
+begin
+   for cur in c_book(10) loop --循环变量cur不需要声明
+	 dbms_output.put_line('bookname:'||cur.bookname);
+   end loop;
+end;
+/
+
+执行结果：
+
+bookname:a1
+bookname:a2
+bookname:a3
+bookname:a4
+
+PL/SQL 过程已成功完成。
+
+-- testcase5 通过bulk collect减少loop处理的开销
+
+（1）在显示游标中,使用FETCH..BALK COLLECT INTO语句提取所有数据
+
+declare
+   cursor emp_cursor is select ename from emp where deptno<10;
+    type ename_table_type is table of varchar2(10);
+    ename_table ename_table_type;
+  begin
+    open emp_cursor;
+    fetch emp_cursor bulk collect into ename_table;
+    for i in 1..ename_table.count loop
+       dbms_output.put_line(ename_table(i));
+    end loop;
+    close emp_cursor;
+  end;
+ /
+ 
+（2）游标中使用FETCH..BULK COLLECT INTO ..LIMIT语句提取部分数据
+
+declare
+    type name_array_type is varray(5) of varchar2(10);
+    name_array name_array_type;
+    cursor emp_cursor is select ename from emp;
+    rows int:=5;
+    v_count int:=0;
+  begin
+    open emp_cursor;
+    loop
+     fetch emp_cursor bulk collect into name_array limit rows;
+     dbms_output.put_line('雇员名');
+     for i in 1..(emp_cursor%rowcount-v_count) loop
+       dbms_output.put(name_array(i)||' ');
+     end loop;
+     dbms_output.new_line;
+    v_count:=emp_cursor%rowcount;
+    exit when emp_cursor%notfound;
+    end loop;
+    close emp_cursor;
+  end;
+  /
+
+执行结果：
+
+雇员名
+a1 a2 a3 a4
+
+--testcase6
+
+使用游标变量
+
+(1)定义ref cursor类型和游标变量
+type ref_type_name is ref cursor [return return_type];
+ 
+cursor_varibale ref_type_name;
+  
+当指定RETURN子句时,其数据类型必须是记录类型,不能在包内定义游标变量
+
+(2)打开游标
+open cursor_variable for select_statement;
+
+(3)提取游标数据
+fetch cursor_varibale into variable1,variable2,...;
+ 
+fetch cursor_varibale bulk collect into collect1,collect2,...[limit rows]
+
+(4)关闭游标变量
+
+close cursor_varibale;
+
+--测试用例 在定义FEF CURSOR类型时不指定RETURN子句
+
+declare
+    type emp_cursor_type is ref cursor;
+    emp_cursor emp_cursor_type;
+    emp_record emp%rowtype;
+  begin
+    open emp_cursor for select * from emp where deptno < 10;
+    loop
+     fetch emp_cursor into emp_record;
+     exit when emp_cursor%notfound;
+     dbms_output.put_line('第'||emp_cursor%rowcount||'个雇员: '||emp_record.ename);
+    end loop;
+    close emp_cursor;
+  end;
+/
+
+执行结果：
+第1个雇员: a1
+第2个雇员: a2
+第3个雇员: a3
+第4个雇员: a4
+
+PL/SQL 过程已成功完成。
+
+
+--测试用例 在定义REF CURSOR类型时指定RETURN子句
+
+declare
+    type emp_record_type is record(name varchar2(10),salary number(6,2));
+    type emp_cursor_type is ref cursor return emp_record_type;
+    emp_cursor emp_cursor_type;
+    emp_record emp_record_type;
+  begin
+    open emp_cursor for select ename,sal from emp where deptno <20;
+    loop
+     fetch emp_cursor into emp_record;
+     exit when emp_cursor%notfound;
+     dbms_output.put_line('第'||emp_cursor%rowcount||'个雇员: '||emp_record.name);
+    end loop;
+    close emp_cursor;
+ end;
+ /
+ 
+执行结果：
+
+第1个雇员: a1
+第2个雇员: a2
+第3个雇员: a3
+第4个雇员: a4
+
+PL/SQL 过程已成功完成。
+
+
+ 
+
+	
+	
+	
