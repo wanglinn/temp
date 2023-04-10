@@ -1,0 +1,105 @@
+Oracle 管道函数的使用
+
+原文链接：https://blog.csdn.net/biqidaoer/article/details/123706046
+
+一 概述：
+1、管道函数即是可以返回行集合（可以使嵌套表nested table 或数组 varray）的函数，我们可以像查询物理表一样查询它或者将其
+
+ 赋值给集合变量。
+
+2、管道函数为并行执行，在普通的函数中使用dbms_output输出的信息，需要在服务器执行完整个函数后一次性的返回给客户端。如果需要在客户端
+
+实时的输出函数执行过程中的一些信息，在oracle9i以后可以使用管道函数(pipeline function)。
+
+3、关键字PIPELINED表明这是一个oracle管道函数，oracle管道函数的返回值类型必须为集合，在函数中，PIPE ROW语句被用来返回该集合的单个元
+
+素，函数以一个空的RETURN 语句结束，以表明它已经完成。
+
+4、由于管道函数的并发多管道流式设计以及实时返回查询结果而去除了中间环节因此可以带来可观的性能提升。
+
+
+二、测试用力
+
+-- testcase1 
+
+create or replace package pkg1 as
+    type numset_t is table of number;
+    function f1(x number) return numset_t pipelined;
+end pkg1;
+/
+
+
+create or replace package body pkg1 as
+    function f1(x number) return numset_t pipelined is
+        begin
+            for i in 1..x loop
+                pipe row(i);
+            end loop;
+            return;
+        end;
+end pkg1;
+/
+
+
+select * from table(pkg1.f1(5));
+
+执行结果：
+
+COLUMN_VALUE
+------------
+           1
+           2
+           3
+           4
+           5
+
+
+三 管道函数用于数据转换
+
+管道函数可以和常规函数一样接收任何参数，下面的管道函数中参数为ref cursor。
+
+drop table if exists emp;
+create table emp(empno int, ename varchar(20), mgr varchar(20));
+
+create or replace package refcur_pkg is
+  type refcur_t is ref cursor return emp%rowtype;
+  type outrec_typ is record (
+    var_num    number(6),
+    var_char1  varchar2(30),
+    var_char2  varchar2(30));
+  type outrecset is table of outrec_typ;
+ function f_trans(p refcur_t) 
+      return outrecset pipelined;
+
+
+create or replace package body refcur_pkg is
+  function f_trans(p refcur_t) 
+   return outrecset pipelined is
+    out_rec outrec_typ;
+    in_rec  p%rowtype;
+  begin
+  loop
+    fetch p into in_rec;
+    exit when p%notfound;
+    -- first row
+    out_rec.var_num := in_rec.empno;
+    out_rec.var_char1 := in_rec.ename;
+    out_rec.var_char2 := in_rec.mgr;
+    pipe row(out_rec);
+    -- second row
+    out_rec.var_num := in_rec.deptno;
+    out_rec.var_char1 := in_rec.deptno;
+    out_rec.var_char2 := in_rec.job;
+    pipe row(out_rec);
+  end loop;
+  close p;
+
+  return;
+  end;
+end refcur_pkg;
+ 
+ 
+select * from table(refcur_pkg.f_trans(cursor(select * from emp where empno=7782)));
+   
+   
+   
