@@ -1,0 +1,31 @@
+#1 oracle 
+关键字PIPELINED表明这是一个oracle管道函数，oracle管道函数的返回值类型必须为集合，在函数中，PIPE
+ROW语句被用来返回该集合的单个元素，函数以一个空的RETURN 语句结束，以表明它已经完成。
+
+由于管道函数的并发多管道流式设计以及实时返回查询结果而去除了中间环节因此可以带来可观的性能提升。
+
+
+简而言之，oracle中使用管道函数最基本的功能就是来返回多条记录。
+
+# pg 
+在PostgreSQL中对应的功能是 setof 表示返回多条记录。
+
+
+create or replace function split (text,text) returns setof text as $$  
+select regexp_split_to_table($1,$2);  
+$$ language sql strict;  
+
+
+select split('a-b-c-d','-');
+
+db1=# select regexp_split_to_table('a-b-c-d','-') ;
+ regexp_split_to_table 
+-----------------------
+ a
+ b
+ c
+ d
+(4 rows)
+
+
+
