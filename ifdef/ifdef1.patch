@@ -1,0 +1,310 @@
+以下是完整的 ecpg 修改 patch，支持 C 原生 #ifdef / #else / #endif 条件编译，与 EXEC SQL IFDEF 共存且互不干扰：
+
+
+
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -95,6 +95,9 @@ static bool ecpg_isspace(char ch);
+ static bool isdefine(void);
+ static bool isinformixdefine(void);
+ 
++/* C 原生 #ifdef 透传模式深度计数器 */
++static int c_ifdef_skip_depth = 0;
++
+ /* C 原生 #ifdef 支持辅助函数 */
+ static bool is_cpp_ifdef_line(const char *line, char **macro_name);
+ static bool is_cpp_else_line(const char *line);
+@@ -...,... @@
+ <C,SQL>{cppline} {
+-    base_yylval.str = loc_strdup(yytext);
+-    return CPP_LINE;
++    char *macro_name = NULL;
++    
++    if (is_cpp_ifdef_line(yytext, &macro_name)) {
++        bool defined = is_macro_defined(macro_name);
++        
++        if (preproc_tos >= MAX_NESTED_IF - 1)
++            mmfatal(PARSE_ERROR, "too many nested #ifdef conditions");
++        
++        preproc_tos++;
++        stacked_if_value[preproc_tos].active = false;
++        stacked_if_value[preproc_tos].saw_active = false;
++        stacked_if_value[preproc_tos].else_branch = false;
++        
++        bool outer_active = (preproc_tos <= 0) || 
++                            stacked_if_value[preproc_tos - 1].active;
++        bool this_active = outer_active && defined;
++        
++        stacked_if_value[preproc_tos].active = this_active;
++        stacked_if_value[preproc_tos].saw_active = this_active;
++        
++        fputs(yytext, yyout);
++        
++        if (this_active)
++            BEGIN(C);
++        else {
++            c_ifdef_skip_depth++;
++            BEGIN(xskip);
++        }
++        
++        free(macro_name);
++    }
++    else if (is_cpp_else_line(yytext)) {
++        if (preproc_tos <= 0) {
++            mmfatal(PARSE_ERROR, "unmatched #else");
++        }
++        else if (stacked_if_value[preproc_tos].else_branch) {
++            mmfatal(PARSE_ERROR, "duplicate #else");
++        }
++        else {
++            stacked_if_value[preproc_tos].else_branch = true;
++            
++            bool outer_active = (preproc_tos <= 0) || 
++                                stacked_if_value[preproc_tos - 1].active;
++            bool any_taken = stacked_if_value[preproc_tos].saw_active;
++            bool this_active = outer_active && !any_taken;
++            
++            stacked_if_value[preproc_tos].active = this_active;
++            if (this_active)
++                stacked_if_value[preproc_tos].saw_active = true;
++            
++            fputs(yytext, yyout);
++            
++            if (this_active) {
++                c_ifdef_skip_depth--;
++                BEGIN(C);
++            } else {
++                BEGIN(xskip);
++            }
++        }
++    }
++    else if (is_cpp_endif_line(yytext)) {
++        if (preproc_tos <= 0) {
++            mmfatal(PARSE_ERROR, "unmatched #endif");
++        }
++        else {
++            preproc_tos--;
++            
++            fputs(yytext, yyout);
++            
++            c_ifdef_skip_depth--;
++            
++            bool active = (preproc_tos <= 0) || 
++                          stacked_if_value[preproc_tos].active;
++            if (active)
++                BEGIN(C);
++            else
++                BEGIN(xskip);
++        }
++    }
++    else {
++        base_yylval.str = loc_strdup(yytext);
++        return CPP_LINE;
++    }
+ }
+ 
+ /* xskip 状态下也需要处理 C 原生 #else / #endif */
+ <xskip>{cppline} {
++    if (is_cpp_else_line(yytext)) {
++        if (preproc_tos <= 0) {
++            mmfatal(PARSE_ERROR, "unmatched #else");
++        }
++        else if (stacked_if_value[preproc_tos].else_branch) {
++            mmfatal(PARSE_ERROR, "duplicate #else");
++        }
++        else {
++            stacked_if_value[preproc_tos].else_branch = true;
++            
++            bool outer_active = (preproc_tos <= 0) || 
++                                stacked_if_value[preproc_tos - 1].active;
++            bool any_taken = stacked_if_value[preproc_tos].saw_active;
++            bool this_active = outer_active && !any_taken;
++            
++            stacked_if_value[preproc_tos].active = this_active;
++            if (this_active)
++                stacked_if_value[preproc_tos].saw_active = true;
++            
++            fputs(yytext, yyout);
++            
++            if (this_active) {
++                c_ifdef_skip_depth--;
++                BEGIN(C);
++            } else {
++                BEGIN(xskip);
++            }
++        }
++    }
++    else if (is_cpp_endif_line(yytext)) {
++        if (preproc_tos <= 0) {
++            mmfatal(PARSE_ERROR, "unmatched #endif");
++        }
++        else {
++            preproc_tos--;
++            
++            fputs(yytext, yyout);
++            
++            c_ifdef_skip_depth--;
++            
++            bool active = (preproc_tos <= 0) || 
++                          stacked_if_value[preproc_tos].active;
++            if (active)
++                BEGIN(C);
++            else
++                BEGIN(xskip);
++        }
++    }
++    else {
++        fputs(yytext, yyout);
++    }
+ }
+ 
+ /* xskip 状态下：普通 EXEC SQL 语句透传 */
+ <xskip>{exec_sql}[^\n]*\n {
+-    fputs(yytext, yyout);
++    if (c_ifdef_skip_depth > 0)
++        fputs(yytext, yyout);
++    /* else：EXEC SQL IFDEF 跳过，不输出 */
+ }
+ 
++/* xskip 状态下：普通 C 代码行 */
++<xskip>[^\n]+\n {
++    if (c_ifdef_skip_depth > 0)
++        fputs(yytext, yyout);
++    /* else：EXEC SQL IFDEF 跳过，不输出 */
++}
++
++<xskip>\n {
++    if (c_ifdef_skip_depth > 0)
++        fputc('\n', yyout);
++    /* else：EXEC SQL IFDEF 跳过，不输出 */
++}
++
++<xskip>. {
++    if (c_ifdef_skip_depth > 0)
++        fputc(yytext[0], yyout);
++    /* else：EXEC SQL IFDEF 跳过，不输出 */
++}
++
+ /* xskip 状态下：嵌套 EXEC SQL IFDEF（保持原有） */
+ <xskip>{exec_sql}{ifdef}{space}* {
+     if (preproc_tos >= MAX_NESTED_IF - 1)
+@@ -...,... @@
+ /* 文件末尾新增辅助函数 */
+ 
++static bool
++is_cpp_ifdef_line(const char *line, char **macro_name)
++{
++    const char *p = line;
++    
++    while (*p && ecpg_isspace(*p))
++        p++;
++    
++    if (*p != '#')
++        return false;
++    p++;
++    
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++    
++    if (strncmp(p, "ifdef", 5) != 0 || 
++        (isalnum((unsigned char)p[5]) || p[5] == '_'))
++        return false;
++    p += 5;
++    
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++    
++    const char *start = p;
++    while (*p && (isalnum((unsigned char)*p) || *p == '_'))
++        p++;
++    
++    int len = p - start;
++    if (len <= 0)
++        return false;
++    
++    *macro_name = (char *) mm_alloc(len + 1);
++    strncpy(*macro_name, start, len);
++    (*macro_name)[len] = '\0';
++    
++    return true;
++}
++
++static bool
++is_cpp_else_line(const char *line)
++{
++    const char *p = line;
++    
++    while (*p && ecpg_isspace(*p))
++        p++;
++    
++    if (*p != '#')
++        return false;
++    p++;
++    
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++    
++    return (strncmp(p, "else", 4) == 0 && 
++            !isalnum((unsigned char)p[4]) && p[4] != '_');
++}
++
++static bool
++is_cpp_endif_line(const char *line)
++{
++    const char *p = line;
++    
++    while (*p && ecpg_isspace(*p))
++        p++;
++    
++    if (*p != '#')
++        return false;
++    p++;
++    
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++    
++    return (strncmp(p, "endif", 5) == 0 && 
++            !isalnum((unsigned char)p[5]) && p[5] != '_');
++}
++
++static bool
++is_macro_defined(const char *name)
++{
++    struct _defines *defptr;
++    
++    for (defptr = defines; defptr; defptr = defptr->next) {
++        if (strcmp(name, defptr->name) == 0 && defptr->value != NULL)
++            return true;
++    }
++    return false;
++}
+
+
+关键修改点总结
+
+| 修改                          | 说明                                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------------- |
+| `c_ifdef_skip_depth`        | 全局计数器，区分 C 原生 `#ifdef` 和 `EXEC SQL IFDEF` 的跳过行为                                     |
+| `<C,SQL>{cppline}`          | 识别 `#ifdef` / `#else` / `#endif`，操作 `stacked_if_value` 栈                            |
+| `<xskip>{cppline}`          | `xskip` 状态下也能处理 `#else` / `#endif`，避免状态不匹配                                          |
+| `<xskip>{exec_sql}[^\n]*\n` | 添加 `c_ifdef_skip_depth` 判断，C 原生时透传                                                  |
+| `<xskip>[^\n]+\n`           | C 原生跳过时透传普通 C 代码行                                                                   |
+| `<xskip>\n`                 | 透传空行                                                                                |
+| `<xskip>.`                  | 透传单个字符                                                                              |
+| 辅助函数                        | `is_cpp_ifdef_line` / `is_cpp_else_line` / `is_cpp_endif_line` / `is_macro_defined` |
+
+
+
+# 测试
+#ifdef XX1
+    printf("aaaaaa1\n");
+    EXEC SQL update t1 set id1= 1;
+#else
+    printf("aaaaaa2\n");
+    ECPGdo(..., "update t1 set id1= 2", ...);
+#endif
+
+
+
+
+
