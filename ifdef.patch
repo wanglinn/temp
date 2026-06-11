@@ -1,0 +1,200 @@
+[wln@vm wlnPg]$ cat 1.patch 
+diff --git a/src/interfaces/ecpg/preproc/pgc.l b/src/interfaces/ecpg/preproc/pgc.l
+index 96eb076..6fff3ba 100644
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -1140,6 +1140,193 @@ cppline                 {space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+                                                return CPP_LINE;
+                                        }
+                                }
++
++<C,xskip>{space}*#{ifdef}{space}+{identifier}{space}*{newline} {
++                                       struct _defines *defptr;
++                                       unsigned int i;
++                                       bool            this_active;
++                                       char       *ident;
++
++                                       if (preproc_tos >= MAX_NESTED_IF - 1)
++                                               mmfatal(PARSE_ERROR, "too many nested EXEC SQL IFDEF conditions");
++                                       preproc_tos++;
++                                       stacked_if_value[preproc_tos].active = false;
++                                       stacked_if_value[preproc_tos].saw_active = false;
++                                       stacked_if_value[preproc_tos].else_branch = false;
++                                       ifcond = true;
++
++                                       /* Extract identifier from yytext */
++                                       ident = (char *) yytext;
++                                       while (*ident && ecpg_isspace(*ident))
++                                               ident++;
++                                       ident += 6;                             /* skip "#ifdef" */
++                                       while (*ident && ecpg_isspace(*ident))
++                                               ident++;
++                                       for (i = strlen(ident) - 1;
++                                                i > 0 && ecpg_isspace(ident[i]);
++                                                i--)
++                                               /* skip */ ;
++                                       ident[i + 1] = '\0';
++
++                                       /* Does a definition exist? */
++                                       for (defptr = defines; defptr; defptr = defptr->next)
++                                       {
++                                               if (strcmp(ident, defptr->name) == 0)
++                                               {
++                                                       /* Found it, but is it currently undefined? */
++                                                       if (defptr->value == NULL)
++                                                               defptr = NULL;  /* pretend it's not found */
++                                                       break;
++                                               }
++                                       }
++
++                                       this_active = (defptr ? ifcond : !ifcond);
++                                       stacked_if_value[preproc_tos].active =
++                                               (stacked_if_value[preproc_tos - 1].active &&
++                                                !stacked_if_value[preproc_tos].saw_active &&
++                                                this_active);
++                                       stacked_if_value[preproc_tos].saw_active |= this_active;
++
++                                       if (stacked_if_value[preproc_tos].active)
++                                               BEGIN(C);
++                                       else
++                                               BEGIN(xskip);
++                               }
++
++<C,xskip>{space}*#{ifndef}{space}+{identifier}{space}*{newline} {
++                                       struct _defines *defptr;
++                                       unsigned int i;
++                                       bool            this_active;
++                                       char       *ident;
++
++                                       if (preproc_tos >= MAX_NESTED_IF - 1)
++                                               mmfatal(PARSE_ERROR, "too many nested EXEC SQL IFDEF conditions");
++                                       preproc_tos++;
++                                       stacked_if_value[preproc_tos].active = false;
++                                       stacked_if_value[preproc_tos].saw_active = false;
++                                       stacked_if_value[preproc_tos].else_branch = false;
++                                       ifcond = false;
++
++                                       /* Extract identifier from yytext */
++                                       ident = (char *) yytext;
++                                       while (*ident && ecpg_isspace(*ident))
++                                               ident++;
++                                       ident += 7;                             /* skip "#ifndef" */
++                                       while (*ident && ecpg_isspace(*ident))
++                                               ident++;
++                                       for (i = strlen(ident) - 1;
++                                                i > 0 && ecpg_isspace(ident[i]);
++                                                i--)
++                                               /* skip */ ;
++                                       ident[i + 1] = '\0';
++
++                                       /* Does a definition exist? */
++                                       for (defptr = defines; defptr; defptr = defptr->next)
++                                       {
++                                               if (strcmp(ident, defptr->name) == 0)
++                                               {
++                                                       /* Found it, but is it currently undefined? */
++                                                       if (defptr->value == NULL)
++                                                               defptr = NULL;  /* pretend it's not found */
++                                                       break;
++                                               }
++                                       }
++
++                                       this_active = (defptr ? ifcond : !ifcond);
++                                       stacked_if_value[preproc_tos].active =
++                                               (stacked_if_value[preproc_tos - 1].active &&
++                                                !stacked_if_value[preproc_tos].saw_active &&
++                                                this_active);
++                                       stacked_if_value[preproc_tos].saw_active |= this_active;
++
++                                       if (stacked_if_value[preproc_tos].active)
++                                               BEGIN(C);
++                                       else
++                                               BEGIN(xskip);
++                               }
++
++<C,xskip>{space}*#{elif}{space}+{identifier}{space}*{newline} {
++                                       struct _defines *defptr;
++                                       unsigned int i;
++                                       bool            this_active;
++                                       char       *ident;
++
++                                       if (preproc_tos == 0)
++                                               mmfatal(PARSE_ERROR, "missing matching \"#ifdef\" / \"#ifndef\"");
++                                       if (stacked_if_value[preproc_tos].else_branch)
++                                               mmfatal(PARSE_ERROR, "missing \"#endif\"");
++                                       ifcond = true;
++
++                                       /* Extract identifier from yytext */
++                                       ident = (char *) yytext;
++                                       while (*ident && ecpg_isspace(*ident))
++                                               ident++;
++                                       ident += 5;                             /* skip "#elif" */
++                                       while (*ident && ecpg_isspace(*ident))
++                                               ident++;
++                                       for (i = strlen(ident) - 1;
++                                                i > 0 && ecpg_isspace(ident[i]);
++                                                i--)
++                                               /* skip */ ;
++                                       ident[i + 1] = '\0';
++
++                                       /* Does a definition exist? */
++                                       for (defptr = defines; defptr; defptr = defptr->next)
++                                       {
++                                               if (strcmp(ident, defptr->name) == 0)
++                                               {
++                                                       /* Found it, but is it currently undefined? */
++                                                       if (defptr->value == NULL)
++                                                               defptr = NULL;  /* pretend it's not found */
++                                                       break;
++                                               }
++                                       }
++
++                                       this_active = (defptr ? ifcond : !ifcond);
++                                       stacked_if_value[preproc_tos].active =
++                                               (stacked_if_value[preproc_tos - 1].active &&
++                                                !stacked_if_value[preproc_tos].saw_active &&
++                                                this_active);
++                                       stacked_if_value[preproc_tos].saw_active |= this_active;
++
++                                       if (stacked_if_value[preproc_tos].active)
++                                               BEGIN(C);
++                                       else
++                                               BEGIN(xskip);
++                               }
++
++<C,xskip>{space}*#{else}{space}*{newline} {
++                                       if (preproc_tos == 0)
++                                               mmfatal(PARSE_ERROR, "missing matching \"#ifdef\" / \"#ifndef\"");
++                                       else if (stacked_if_value[preproc_tos].else_branch)
++                                               mmfatal(PARSE_ERROR, "more than one #else");
++                                       else
++                                       {
++                                               stacked_if_value[preproc_tos].else_branch = true;
++                                               stacked_if_value[preproc_tos].active =
++                                                       (stacked_if_value[preproc_tos - 1].active &&
++                                                        !stacked_if_value[preproc_tos].saw_active);
++                                               stacked_if_value[preproc_tos].saw_active = true;
++
++                                               if (stacked_if_value[preproc_tos].active)
++                                                       BEGIN(C);
++                                               else
++                                                       BEGIN(xskip);
++                                       }
++                               }
++
++<C,xskip>{space}*#{endif}{space}*{newline} {
++                                       if (preproc_tos == 0)
++                                               mmfatal(PARSE_ERROR, "unmatched #endif");
++                                       else
++                                               preproc_tos--;
++
++                                       if (stacked_if_value[preproc_tos].active)
++                                               BEGIN(C);
++                                       else
++                                               BEGIN(xskip);
++                               }
++
+ <C,SQL>{cppline} {
+                                        base_yylval.str = loc_strdup(yytext);
+                                        return CPP_LINE;
+[wln@vm wlnPg]$ 
