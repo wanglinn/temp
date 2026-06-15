@@ -159,6 +159,49 @@
  	char		inc_file[MAXPGPATH];
  	unsigned int i;
 
+#3 
+上面修改 验证如下场景没问题，符合预期， PC 文件如下
+#include <stdio.h>
+
+#include <string.h>
+
+
+
+#include "h1.h"
+
+#include "h2.h"
+
+
+
+，但是下面场景不符合预期，PC 文件为
+EXEC SQL INCLUDE sqlca;
+
+EXEC SQL INCLUDE sqlda;
+
+
+
+发现只对 sqlca 进行了展开，EXEC SQL INCLUDE sqlda; 对应输出内容为 #include sqlda;
+
+
+若PC 文件为
+
+EXEC SQL INCLUDE sqlca;
+
+EXEC SQL INCLUDE sqlda;
+
+则在 parse_include 处理时，发现
+
+sqlca 不会进入  	if (current_file_is_system_header || current_file_is_angle_bracket)
+ 	{
+
+而 sqlda 则会进入 这个if 语句块内
+
+》 请确认：你当前的 pgc.l 中，<<EOF>> 部分是否有 current_file_is_system_header = yb->is_system_header; 这行代码？
+如果有，就修改为：
+
+current_file_is_angle_bracket = (yb->next != NULL) ? yb->next->is_angle_bracket : false;
+current_file_is_system_header = (yb->next != NULL) ? yb->next->is_system_header : false;
+
 
  
 
