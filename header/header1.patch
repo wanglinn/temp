@@ -1,0 +1,165 @@
+#1 
+
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -56,6 +56,12 @@ static int	literalalloc;		/* current allocated buffer size */
+ /* Used for detecting global state together with braces_open */
+ static int	parenths_open;
+
++/*
++ * Include format tracking: true if current file was included via <...>
++ * rather than "...". When true, all nested #include directives are
++ * output directly without recursive parsing.
++ */
++ static bool current_file_is_system_header = false;
++static bool	current_file_is_angle_bracket = false;
++
+ /* Used to tell parse_include() whether the command was #include or #include_next */
+ static bool include_next;
+
+@@ -80,6 +86,8 @@ struct _yy_buffer
+ 	YY_BUFFER_STATE buffer;
+ 	long		lineno;
+ 	char	   *filename;
++	bool		is_angle_bracket;	/* true if included via <...> format */
++	bool		is_system_header;	/* true if this is an ECPG system header */
+ 	struct _yy_buffer *next;
+ } *yy_buffer = NULL;
+
+@@ -1127,7 +1135,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]
+
+ <C>{cppinclude}	{
+-					if (system_includes)
++					if (system_includes || current_file_is_system_header)
+ 					{
+ 						include_next = false;
+ 						BEGIN(incl);
+@@ -1565,6 +1573,11 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]
+ 						if (yyin != NULL)
+ 							fclose(yyin);
+
++						/* Restore include format and system header flags */
++						current_file_is_angle_bracket = yb->is_angle_bracket;
++						current_file_is_system_header = yb->is_system_header;
++
+ 						yy_delete_buffer(YY_CURRENT_BUFFER);
+ 						yy_switch_to_buffer(yy_buffer->buffer);
+
+@@ -1703,6 +1716,33 @@ parse_include(void)
+ 	/* got the include file name */
+ 	struct _yy_buffer *yb;
+ 	struct _include_path *ip;
++	const char *basename;
++	const char *slash;
++	bool		is_ecpg_system = false;
++	bool		is_angle = false;
+ 	char		inc_file[MAXPGPATH];
+ 	unsigned int i;
+
++	/*
++	 * Determine the include format BEFORE we modify yytext.
++	 * yytext[0] is '<' for #include <...> format, or '"' for #include "..." format.
++	 */
++	is_angle = (yytext[0] == '<');
++
++	/*
++	 * If we are inside an ECPG system header file, or inside a file that
++	 * was included via <...> format (system header like stdio.h), output
++	 * the #include directive directly without recursive parsing.
++	 * This prevents "could not open include file" errors for files like
++	 * sqlda-compat.h or stddef.h that are not in ECPG's search paths.
++	 */
++	if (current_file_is_system_header || current_file_is_angle_bracket)
++	{
++		/* Output the original #include directive and return to C state */
++		fprintf(yyout, "#include %s\n", yytext);
++		BEGIN(C);
++		return;
++	}
++
+ 	yb = mm_alloc(sizeof(struct _yy_buffer));
+
+ 	yb->buffer = YY_CURRENT_BUFFER;
+@@ -1711,6 +1751,8 @@ parse_include(void)
+ 	yb->filename = input_filename;
+ 	yb->next = yy_buffer;
+
++	/* Save current flags before we potentially change them */
++	yb->is_angle_bracket = current_file_is_angle_bracket;
++	yb->is_system_header = current_file_is_system_header;
+ 	yy_buffer = yb;
+
+ 	/*
+@@ -1783,6 +1825,25 @@ parse_include(void)
+ 	if (!yyin)
+ 		mmfatal(NO_INCLUDE_FILE, "could not open include file "%s" on line %d", yytext, yylineno);
+
++	/*
++	 * Check if the file being opened is an ECPG system header.
++	 * These PostgreSQL-provided headers (sqlda.h, sqlca.h, etc.)
++	 * may contain #include directives referencing files not in
++	 * ECPG's standard search paths.
++	 */
++	slash = strrchr(inc_file, '/');
++	if (slash != NULL)
++		basename = slash + 1;
++	else
++		basename = inc_file;
++	
++	is_ecpg_system = (strcmp(basename, "sqlda.h") == 0 ||
++					  strcmp(basename, "sqlca.h") == 0 ||
++					  strcmp(basename, "ecpglib.h") == 0 ||
++					  strcmp(basename, "ecpgerrno.h") == 0 ||
++					  strcmp(basename, "ecpg_informix.h") == 0 ||
++					  strcmp(basename, "ecpgtype.h") == 0);
++
+ 	input_filename = mm_strdup(inc_file);
+ 	yy_switch_to_buffer(yy_create_buffer(yyin, YY_BUF_SIZE));
+ 	yylineno = 1;
+@@ -1790,6 +1851,11 @@ parse_include(void)
+
+ 	BEGIN(C);
+
++	/* Set flags for the newly opened file */
++	current_file_is_angle_bracket = is_angle;
++	current_file_is_system_header = is_ecpg_system;
++	yb->is_angle_bracket = is_angle;
++	yb->is_system_header = is_ecpg_system;
++
+ 	return;
+ }
+
+
+#2 
+上面有个问题， pc 文件内容
+#include <stdio.h>
+
+#include <string.h>
+
+上面修改后， 发现在生成的.c文件中，这两个头文件被展开了，实际上不需要展开， 也就是 只要是 #include <xx.h> 这种的 就不需要开展
+
+
+》 明白了，只需要在 parse_include() 函数中添加 4 行代码，判断 yytext[0] == '<' 时直接输出
+
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -1703,6 +1703,15 @@ parse_include(void)
+ 	/* got the include file name */
+ 	struct _yy_buffer *yb;
+ 	struct _include_path *ip;
++
++	/* #include <...> format: output directly to .c file, do not parse/expand */
++	if (yytext[0] == '<')
++	{
++		fprintf(yyout, "#include %s\n", yytext);
++		BEGIN(C);
++		return;
++	}
++
+ 	char		inc_file[MAXPGPATH];
+ 	unsigned int i;
+
+
+ 
+
+
