@@ -1,0 +1,2483 @@
+commit 2b743826766daf1654b61dbe00f106d71768db85
+Author: wangln@sina.cn <wangln@sina.cn>
+Date:   Mon Jun 15 10:55:41 2026 -0700
+
+    fix: head 1
+
+diff --git a/src/interfaces/ecpg/preproc/Makefile b/src/interfaces/ecpg/preproc/Makefile
+index 6968fca..2d3842a 100644
+--- a/src/interfaces/ecpg/preproc/Makefile
++++ b/src/interfaces/ecpg/preproc/Makefile
+@@ -34,6 +34,7 @@ OBJS = \
+ 	parser.o \
+ 	pgc.o \
+ 	preproc.o \
++	preproc_import.o \
+ 	type.o \
+ 	typename.o \
+ 	util.o \
+diff --git a/src/interfaces/ecpg/preproc/ecpg.c b/src/interfaces/ecpg/preproc/ecpg.c
+index 1db55be..c38afe1 100644
+--- a/src/interfaces/ecpg/preproc/ecpg.c
++++ b/src/interfaces/ecpg/preproc/ecpg.c
+@@ -50,6 +50,9 @@ help(const char *progname)
+ 	printf(_("  -D SYMBOL      define SYMBOL\n"));
+ 	printf(_("  -h             parse a header file, this option includes option \"-c\"\n"));
+ 	printf(_("  -i             parse system include files as well\n"));
++	printf(_("  --import-struct-includes\n"
++			 "                 extract struct/union/enum/typedef definitions from\n"
++			 "                 #include \"...\" for host-variable registration\n"));
+ 	printf(_("  -I DIRECTORY   search DIRECTORY for include files\n"));
+ 	printf(_("  -o OUTFILE     write result to OUTFILE\n"));
+ 	printf(_("  -r OPTION      specify run-time behavior; OPTION can be:\n"
+@@ -126,11 +129,13 @@ add_preprocessor_define(char *define)
+ }
+ 
+ #define ECPG_GETOPT_LONG_REGRESSION		1
++#define ECPG_GETOPT_LONG_IMPORT_STRUCTS	2
+ int
+ main(int argc, char *const argv[])
+ {
+ 	static struct option ecpg_options[] = {
+ 		{"regression", no_argument, NULL, ECPG_GETOPT_LONG_REGRESSION},
++		{"import-struct-includes", no_argument, NULL, ECPG_GETOPT_LONG_IMPORT_STRUCTS},
+ 		{NULL, 0, NULL, 0}
+ 	};
+ 
+@@ -256,6 +261,9 @@ main(int argc, char *const argv[])
+ 			case ECPG_GETOPT_LONG_REGRESSION:
+ 				regression_mode = true;
+ 				break;
++			case ECPG_GETOPT_LONG_IMPORT_STRUCTS:
++				import_struct_includes = true;
++				break;
+ 			default:
+ 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), argv[0]);
+ 				return ILLEGAL_OPTION;
+diff --git a/src/interfaces/ecpg/preproc/meson.build b/src/interfaces/ecpg/preproc/meson.build
+index 3a56e2b..d06accf 100644
+--- a/src/interfaces/ecpg/preproc/meson.build
++++ b/src/interfaces/ecpg/preproc/meson.build
+@@ -9,6 +9,7 @@ ecpg_sources = files(
+   'keywords.c',
+   'output.c',
+   'parser.c',
++  'preproc_import.c',
+   'type.c',
+   'util.c',
+   'variable.c',
+diff --git a/src/interfaces/ecpg/preproc/pgc.l b/src/interfaces/ecpg/preproc/pgc.l
+index 96eb076..51d8af5 100644
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -27,6 +27,9 @@
+ 
+ #include "preproc_extern.h"
+ #include "preproc.h"
++#include "preproc_import.h"
++
++#define YY_USER_INIT import_check_output_restore();
+ }
+ 
+ %{
+@@ -59,6 +62,8 @@ static void addlit(char *ytext, int yleng);
+ static void addlitchar(unsigned char ychar);
+ static int	process_integer_literal(const char *token, YYSTYPE *lval, int base);
+ static void parse_include(void);
++static void process_include_for_structs(const char *yytext);
++static void import_check_output_restore(void);
+ static bool ecpg_isspace(char ch);
+ static bool isdefine(void);
+ static bool isinformixdefine(void);
+@@ -1116,6 +1121,18 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ <C>{ccomment}	{
+ 					ECHO;
+ 				}
++<C>{space}*#{include}{space}+"\""[^\"]*"\""{space}*{newline} {
++						if (import_struct_includes)
++						{
++							ECHO;
++							process_include_for_structs(yytext);
++						}
++						else
++						{
++							base_yylval.str = loc_strdup(yytext);
++							return CPP_LINE;
++						}
++					}
+ <C>{cppinclude}	{
+ 					if (system_includes)
+ 					{
+@@ -1800,6 +1817,89 @@ parse_include(void)
+ }
+ 
+ /*
++ * Support for --import-struct-includes: when a #include "..." is seen,
++ * extract struct/union/enum/typedef declarations from the header and feed
++ * them to the parser so ECPG registers the types.  The original #include line
++ * is echoed normally; parser output during registration is suppressed so the
++ * declarations are not duplicated in the generated .c file.
++ */
++static YY_BUFFER_STATE import_reg_buffer = NULL;
++static FILE *import_saved_yyout = NULL;
++static bool import_output_suppressed = false;
++
++static void
++import_check_output_restore(void)
++{
++	if (import_output_suppressed && YY_CURRENT_BUFFER != import_reg_buffer)
++	{
++		if (base_yyout)
++			fclose(base_yyout);
++		base_yyout = import_saved_yyout;
++		import_output_suppressed = false;
++		import_reg_buffer = NULL;
++	}
++}
++
++static void
++process_include_for_structs(const char *yytext)
++{
++	char			  filename[MAXPGPATH];
++	const char		 *p;
++	const char		 *start;
++	const char		 *end;
++	char			 *decls;
++	char			 *wrapped;
++	struct _yy_buffer *yb;
++
++	/* Extract filename between the first pair of double quotes. */
++	p = strchr(yytext, '"');
++	if (!p)
++		return;
++	start = p + 1;
++	end = strchr(start, '"');
++	if (!end || end - start >= MAXPGPATH)
++		return;
++	memcpy(filename, start, end - start);
++	filename[end - start] = '\0';
++
++	decls = ecpg_extract_struct_decls(filename);
++	if (!decls || !decls[0])
++		return;
++
++	fprintf(stderr, "--- extracted from %s ---\n%s\n---\n", filename, decls);
++
++	wrapped = (char *) mm_alloc(strlen(decls) + 128);
++	sprintf(wrapped,
++			"EXEC SQL BEGIN DECLARE SECTION;\n"
++			"%s"
++			"EXEC SQL END DECLARE SECTION;\n",
++			decls);
++	fprintf(stderr, "--- wrapped ---\n%s\n---\n", wrapped);
++
++	/* Suppress parser output while the synthetic declarations are parsed. */
++	import_saved_yyout = base_yyout;
++	base_yyout = tmpfile();
++	if (!base_yyout)
++		mmfatal(NO_INCLUDE_FILE, "could not create temp file for import");
++
++	yb = (struct _yy_buffer *) mm_alloc(sizeof(struct _yy_buffer));
++	yb->buffer = yy_scan_string(wrapped);
++	yb->lineno = yylineno;
++	yb->filename = mm_strdup(input_filename);
++	yb->next = yy_buffer;
++	yy_buffer = yb;
++
++	yy_switch_to_buffer(yb->buffer);
++	yylineno = 1;
++	free(input_filename);
++	input_filename = mm_strdup(filename);
++	import_reg_buffer = YY_CURRENT_BUFFER;
++	import_output_suppressed = true;
++
++	BEGIN(C);
++}
++
++/*
+  * ecpg_isspace() --- return true if flex scanner considers char whitespace
+  */
+ static bool
+diff --git a/src/interfaces/ecpg/preproc/preproc_extern.h b/src/interfaces/ecpg/preproc/preproc_extern.h
+index 2c89e30..c5d336f 100644
+--- a/src/interfaces/ecpg/preproc/preproc_extern.h
++++ b/src/interfaces/ecpg/preproc/preproc_extern.h
+@@ -49,6 +49,7 @@ extern FILE *base_yyin,
+ 		   *base_yyout;
+ extern char *output_filename;
+ 
++extern bool import_struct_includes;
+ extern struct _include_path *include_paths;
+ extern struct cursor *cur;
+ extern struct typedefs *types;
+diff --git a/src/interfaces/ecpg/preproc/preproc_import.c b/src/interfaces/ecpg/preproc/preproc_import.c
+new file mode 100644
+index 0000000..003e293
+--- /dev/null
++++ b/src/interfaces/ecpg/preproc/preproc_import.c
+@@ -0,0 +1,1032 @@
++/*
++ * preproc_import.c
++ *
++ * Tolerant extraction of struct/union/enum/typedef definitions from
++ * C header files included via #include "...".
++ *
++ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
++ *
++ * src/interfaces/ecpg/preproc/preproc_import.c
++ */
++
++#include "postgres_fe.h"
++
++#include <ctype.h>
++#include <unistd.h>
++
++#include "lib/stringinfo.h"
++#include "port.h"
++
++#include "preproc_extern.h"
++#include "preproc_import.h"
++
++/*
++ * Conditional-compilation stack depth.  Must be enough for real headers;
++ * 128 matches the existing EXEC SQL IFDEF limit.
++ */
++#define MAX_COND_DEPTH 128
++
++/*
++ * Local macro table for a single scan.  We copy the global "defines" list at
++ * start and update it with #define/#undef encountered inside the header, so
++ * that header macros do not leak into ECPG's main preprocessor state.
++ */
++typedef struct ImportDefine
++{
++	char			*name;
++	char			*value;		/* NULL means undefined */
++	struct ImportDefine *next;
++} ImportDefine;
++
++typedef struct ImportCond
++{
++	bool			active;		/* branch currently active */
++	bool			saw_active;	/* any active branch seen at this level */
++	bool			else_branch;	/* already saw #else */
++} ImportCond;
++
++typedef struct VisitedPath
++{
++	char			*path;
++	struct VisitedPath *next;
++} VisitedPath;
++
++typedef struct ImportScanContext
++{
++	const char		*filename;	/* file being scanned */
++	const char		*p;		/* current scan position */
++	int				 lineno;
++
++	StringInfoData	 decls;		/* extracted declarations */
++
++	ImportCond		 cond_stack[MAX_COND_DEPTH];
++	int				 cond_tos;
++
++	ImportDefine	*defines;	/* local macro table */
++
++	VisitedPath		*visited;	/* absolute paths already scanned */
++
++	int				 brace_depth;
++	int				 paren_depth;
++} ImportScanContext;
++
++bool				 import_struct_includes = false;
++
++static void import_scan_file(ImportScanContext *ctx, const char *filename);
++static void import_scan_content(ImportScanContext *ctx,
++								const char *content, const char *filename);
++static void import_handle_preproc(ImportScanContext *ctx);
++static void import_extract_declaration(ImportScanContext *ctx);
++static bool import_starts_type_definition(ImportScanContext *ctx);
++
++static bool import_is_defined(ImportScanContext *ctx, const char *name);
++static void import_define(ImportScanContext *ctx,
++						  const char *name, const char *value);
++static void import_undefine(ImportScanContext *ctx, const char *name);
++static void import_copy_global_defines(ImportScanContext *ctx);
++
++static char *import_resolve_include(ImportScanContext *ctx,
++									const char *filename, bool quoted);
++static char *import_try_open(const char *path);
++static bool import_already_visited(ImportScanContext *ctx, const char *path);
++static void import_mark_visited(ImportScanContext *ctx, const char *path);
++
++static void import_skip_block_comment(ImportScanContext *ctx);
++static void import_skip_line_comment(ImportScanContext *ctx);
++static void import_skip_string(ImportScanContext *ctx, char quote);
++
++static bool import_is_word_at(const char *p, const char *word);
++
++static void import_push_cond(ImportScanContext *ctx, bool this_branch_active);
++static void import_switch_cond(ImportScanContext *ctx, bool this_branch_active);
++static void import_else_cond(ImportScanContext *ctx);
++static void import_pop_cond(ImportScanContext *ctx);
++
++static void import_skip_space_at(ImportScanContext *ctx, const char **pp);
++static bool import_get_word_at_p(ImportScanContext *ctx, const char **pp,
++								 char *buf, size_t bufsize);
++static bool import_get_word_at(const char *p, char *buf, size_t bufsize);
++static bool import_eval_if_defined(ImportScanContext *ctx, const char *p);
++
++static void import_skip_block_comment_at(const char **pp, int *lineno);
++static void import_skip_line_comment_at(const char **pp, int *lineno);
++static void import_skip_string_at(const char **pp, char quote, int *lineno);
++
++
++/*
++ * Public entry point: extract struct/union/enum/typedef declarations from a
++ * header file.  Returns a pointer to an mm_alloc'd string (possibly empty),
++ * or NULL if the file cannot be opened.  The caller must not free the result.
++ */
++char *
++ecpg_extract_struct_decls(const char *filename)
++{
++	ImportScanContext ctx;
++
++	memset(&ctx, 0, sizeof(ctx));
++	initStringInfo(&ctx.decls);
++	ctx.cond_tos = 0;
++	ctx.cond_stack[0].active = true;
++	ctx.cond_stack[0].saw_active = true;
++	ctx.cond_stack[0].else_branch = false;
++	ctx.brace_depth = 0;
++	ctx.paren_depth = 0;
++
++	import_copy_global_defines(&ctx);
++
++	import_scan_file(&ctx, filename);
++
++	/* Free local macro table. */
++	while (ctx.defines)
++	{
++		ImportDefine *d = ctx.defines;
++		ctx.defines = d->next;
++		free(d->name);
++		if (d->value)
++			free(d->value);
++		free(d);
++	}
++
++	/* Free visited list. */
++	while (ctx.visited)
++	{
++		VisitedPath *v = ctx.visited;
++		ctx.visited = v->next;
++		free(v->path);
++		free(v);
++	}
++
++	/*
++	 * Return mm_alloc'd copy.  StringInfo uses frontend malloc, but ECPG callers
++	 * expect mm_alloc style; copy once and let StringInfo buffer be freed at
++	 * function exit.
++	 */
++	return mm_strdup(ctx.decls.data);
++}
++
++/*
++ * Scan a single file, identified by its (possibly relative) filename.
++ */
++static void
++import_scan_file(ImportScanContext *ctx, const char *filename)
++{
++	char			*resolved;
++	char			*content;
++	const char		*saved_filename;
++
++	resolved = import_resolve_include(ctx, filename, true);
++	if (!resolved)
++		return;
++
++	fprintf(stderr, "[import] resolving '%s' -> '%s'\n", filename, resolved);
++
++	if (import_already_visited(ctx, resolved))
++	{
++		free(resolved);
++		return;
++	}
++	import_mark_visited(ctx, resolved);
++
++	content = import_try_open(resolved);
++	if (!content)
++	{
++		free(resolved);
++		return;
++	}
++
++	saved_filename = ctx->filename;
++	int				saved_lineno = ctx->lineno;
++	import_scan_content(ctx, content, resolved);
++	ctx->filename = saved_filename;
++	ctx->lineno = saved_lineno;
++
++	free(content);
++	free(resolved);
++}
++
++/*
++ * Read a file into a malloc'd, null-terminated buffer.
++ */
++static char *
++import_try_open(const char *path)
++{
++	FILE			*fp;
++	long			 len;
++	char			*buf;
++
++	fp = fopen(path, "r");
++	if (!fp)
++		return NULL;
++
++	if (fseek(fp, 0, SEEK_END) != 0 ||
++		(len = ftell(fp)) < 0 ||
++		fseek(fp, 0, SEEK_SET) != 0)
++	{
++		fclose(fp);
++		return NULL;
++	}
++
++	buf = (char *) malloc(len + 1);
++	if (!buf)
++	{
++		fclose(fp);
++		return NULL;
++	}
++
++	if (fread(buf, 1, len, fp) != (size_t) len)
++	{
++		free(buf);
++		fclose(fp);
++		return NULL;
++	}
++	buf[len] = '\0';
++	fclose(fp);
++
++	return buf;
++}
++
++/*
++ * Resolve an include filename.  For quoted includes we try:
++ *   1. As-is (relative to cwd or the including file's directory)
++ *   2. Each -I path
++ * We do not search system default paths for quoted includes, matching ECPG's
++ * existing EXEC SQL INCLUDE behavior.
++ */
++static char *
++import_resolve_include(ImportScanContext *ctx, const char *filename, bool quoted)
++{
++	struct _include_path *ip;
++	char				  inc_file[MAXPGPATH];
++	char				  dir[MAXPGPATH];
++	char				 *abs;
++	FILE				 *fp;
++
++	(void) quoted;				/* reserved for future <...> handling */
++
++	/* Try filename as-is. */
++	fp = fopen(filename, "r");
++	if (fp)
++	{
++		fclose(fp);
++		abs = make_absolute_path(filename);
++		if (abs)
++			return abs;
++	}
++
++	/* Try relative to the including file's directory. */
++	if (ctx->filename)
++	{
++		strlcpy(dir, ctx->filename, sizeof(dir));
++		get_parent_directory(dir);
++		if (strlen(dir) > 0)
++		{
++			snprintf(inc_file, sizeof(inc_file), "%s/%s", dir, filename);
++			fp = fopen(inc_file, "r");
++			if (fp)
++			{
++				fclose(fp);
++				return make_absolute_path(inc_file);
++			}
++		}
++	}
++
++	/* Try include paths. */
++	for (ip = include_paths; ip != NULL; ip = ip->next)
++	{
++		if (strlen(ip->path) + strlen(filename) + 2 > MAXPGPATH)
++			continue;
++		snprintf(inc_file, sizeof(inc_file), "%s/%s", ip->path, filename);
++		fp = fopen(inc_file, "r");
++		if (fp)
++		{
++			fclose(fp);
++			return make_absolute_path(inc_file);
++		}
++		/* Try with .h appended. */
++		if (strlen(filename) <= 2 || strcmp(filename + strlen(filename) - 2, ".h") != 0)
++		{
++			snprintf(inc_file, sizeof(inc_file), "%s/%s.h", ip->path, filename);
++			fp = fopen(inc_file, "r");
++			if (fp)
++			{
++				fclose(fp);
++				return make_absolute_path(inc_file);
++			}
++		}
++	}
++
++	return NULL;
++}
++
++static bool
++import_already_visited(ImportScanContext *ctx, const char *path)
++{
++	VisitedPath *v;
++
++	for (v = ctx->visited; v; v = v->next)
++	{
++		if (strcmp(v->path, path) == 0)
++			return true;
++	}
++	return false;
++}
++
++static void
++import_mark_visited(ImportScanContext *ctx, const char *path)
++{
++	VisitedPath *v = (VisitedPath *) malloc(sizeof(VisitedPath));
++	v->path = strdup(path);
++	v->next = ctx->visited;
++	ctx->visited = v;
++}
++
++/*
++ * Main content scanner.
++ */
++static void
++import_scan_content(ImportScanContext *ctx, const char *content,
++					const char *filename)
++{
++	ctx->filename = filename;
++	ctx->p = content;
++	ctx->lineno = 1;
++
++	while (*ctx->p)
++	{
++		/* Whitespace. */
++		if (isspace((unsigned char) *ctx->p))
++		{
++			if (*ctx->p == '\n')
++				ctx->lineno++;
++			ctx->p++;
++			continue;
++		}
++
++		/* Comments and literals. */
++		if (ctx->p[0] == '/' && ctx->p[1] == '*')
++		{
++			import_skip_block_comment(ctx);
++			continue;
++		}
++		if (ctx->p[0] == '/' && ctx->p[1] == '/')
++		{
++			import_skip_line_comment(ctx);
++			continue;
++		}
++		if (*ctx->p == '"')
++		{
++			import_skip_string(ctx, '"');
++			continue;
++		}
++		if (*ctx->p == '\'')
++		{
++			import_skip_string(ctx, '\'');
++			continue;
++		}
++
++		/* Track brace/paren depth outside of inactive branches. */
++		if (ctx->cond_stack[ctx->cond_tos].active)
++		{
++			if (*ctx->p == '{')
++			{
++				ctx->brace_depth++;
++				ctx->p++;
++				continue;
++			}
++			if (*ctx->p == '}')
++			{
++				ctx->brace_depth--;
++				ctx->p++;
++				continue;
++			}
++			if (*ctx->p == '(')
++			{
++				ctx->paren_depth++;
++				ctx->p++;
++				continue;
++			}
++			if (*ctx->p == ')')
++			{
++				ctx->paren_depth--;
++				ctx->p++;
++				continue;
++			}
++		}
++
++		/* Preprocessor directive. */
++		if (*ctx->p == '#')
++		{
++			import_handle_preproc(ctx);
++			continue;
++		}
++
++		/*
++		 * Only extract declarations in active branches and at top-level depth.
++		 */
++		if (ctx->cond_stack[ctx->cond_tos].active &&
++			ctx->brace_depth == 0 &&
++			ctx->paren_depth == 0)
++		{
++			bool starts = import_starts_type_definition(ctx);
++			if (starts)
++			{
++				fprintf(stderr, "[import] extracting at %s:%d\n", ctx->filename, ctx->lineno);
++				import_extract_declaration(ctx);
++				continue;
++			}
++			else if (import_is_word_at(ctx->p, "struct") ||
++					 import_is_word_at(ctx->p, "union") ||
++					 import_is_word_at(ctx->p, "enum") ||
++					 import_is_word_at(ctx->p, "typedef"))
++			{
++				fprintf(stderr, "[import] skipped keyword at %s:%d (next='%c')\n",
++						ctx->filename, ctx->lineno, *ctx->p);
++			}
++		}
++
++		ctx->p++;
++	}
++}
++
++/*
++ * Skip helpers.
++ */
++static void
++import_skip_block_comment(ImportScanContext *ctx)
++{
++	ctx->p += 2;
++	while (*ctx->p)
++	{
++		if (ctx->p[0] == '*' && ctx->p[1] == '/')
++		{
++			ctx->p += 2;
++			return;
++		}
++		if (*ctx->p == '\n')
++			ctx->lineno++;
++		ctx->p++;
++	}
++}
++
++static void
++import_skip_line_comment(ImportScanContext *ctx)
++{
++	ctx->p += 2;
++	while (*ctx->p && *ctx->p != '\n')
++		ctx->p++;
++}
++
++static void
++import_skip_string(ImportScanContext *ctx, char quote)
++{
++	ctx->p++;
++	while (*ctx->p)
++	{
++		if (*ctx->p == '\\' && ctx->p[1])
++		{
++			ctx->p += 2;
++			continue;
++		}
++		if (*ctx->p == quote)
++		{
++			ctx->p++;
++			return;
++		}
++		if (*ctx->p == '\n')
++			ctx->lineno++;
++		ctx->p++;
++	}
++}
++
++/*
++ * Check whether p points to a complete word (not a prefix of an identifier).
++ */
++static bool
++import_is_word_at(const char *p, const char *word)
++{
++	size_t			  len = strlen(word);
++
++	if (strncmp(p, word, len) != 0)
++		return false;
++	return !isalnum((unsigned char) p[len]) && p[len] != '_';
++}
++
++/*
++ * Handle a preprocessor line starting at '#'.
++ */
++static void
++import_handle_preproc(ImportScanContext *ctx)
++{
++	const char		 *line_start;
++	const char		 *line_end;
++	const char		 *q;
++	char			  word[128];
++	char			  name[128];
++	bool			  was_active;
++	bool			  cond_value;
++
++	/* Find end of line (respect \ continuations). */
++	line_start = ctx->p;
++	line_end = ctx->p;
++	while (*line_end)
++	{
++		if (*line_end == '\\' && line_end[1] == '\n')
++		{
++			line_end += 2;
++			ctx->lineno++;
++			continue;
++		}
++		if (*line_end == '\n')
++			break;
++		line_end++;
++	}
++
++	q = line_start + 1;
++	import_skip_space_at(ctx, &q); /* custom: skip spaces without updating lineno */
++
++	/* Read directive word. */
++	if (!import_get_word_at_p(ctx, &q, word, sizeof(word)))
++	{
++		ctx->p = line_end;
++		if (*ctx->p == '\n')
++		{
++			ctx->lineno++;
++			ctx->p++;
++		}
++		return;
++	}
++
++	was_active = ctx->cond_stack[ctx->cond_tos].active;
++
++	if (strcmp(word, "ifdef") == 0)
++	{
++		if (!import_get_word_at_p(ctx, &q, name, sizeof(name)))
++			goto done;
++		cond_value = import_is_defined(ctx, name);
++		import_push_cond(ctx, cond_value);
++	}
++	else if (strcmp(word, "ifndef") == 0)
++	{
++		if (!import_get_word_at_p(ctx, &q, name, sizeof(name)))
++			goto done;
++		cond_value = !import_is_defined(ctx, name);
++		import_push_cond(ctx, cond_value);
++	}
++	else if (strcmp(word, "if") == 0)
++	{
++		/*
++		* Support only #if defined(NAME) and #if !defined(NAME).  Anything
++		* else is conservatively treated as true.
++		*/
++		cond_value = import_eval_if_defined(ctx, q);
++		import_push_cond(ctx, cond_value);
++	}
++	else if (strcmp(word, "elif") == 0)
++	{
++		if (ctx->cond_tos == 0)
++			goto done;
++		if (ctx->cond_stack[ctx->cond_tos].else_branch)
++			goto done;
++		cond_value = import_eval_if_defined(ctx, q);
++		import_switch_cond(ctx, cond_value);
++	}
++	else if (strcmp(word, "else") == 0)
++	{
++		if (ctx->cond_tos == 0)
++			goto done;
++		import_else_cond(ctx);
++	}
++	else if (strcmp(word, "endif") == 0)
++	{
++		if (ctx->cond_tos == 0)
++			goto done;
++		import_pop_cond(ctx);
++	}
++	else if (was_active && strcmp(word, "include") == 0)
++	{
++		char			  inc_file[MAXPGPATH];
++
++		import_skip_space_at(ctx, &q);
++		if (*q == '"')
++		{
++			const char		 *start = ++q;
++			while (*q && *q != '"')
++				q++;
++			if (*q == '"')
++			{
++				size_t			  len = q - start;
++
++				if (len >= sizeof(inc_file))
++					len = sizeof(inc_file) - 1;
++				memcpy(inc_file, start, len);
++				inc_file[len] = '\0';
++				import_scan_file(ctx, inc_file);
++			}
++		}
++	}
++	else if (was_active && strcmp(word, "define") == 0)
++	{
++		char			  value[1024];
++		const char		 *val_start;
++		size_t			  val_len;
++
++		import_skip_space_at(ctx, &q);
++		if (import_get_word_at_p(ctx, &q, name, sizeof(name)))
++		{
++			val_start = q;
++			val_len = line_end - val_start;
++			while (val_len > 0 && isspace((unsigned char) val_start[val_len - 1]))
++				val_len--;
++			if (val_len >= sizeof(value))
++				val_len = sizeof(value) - 1;
++			memcpy(value, val_start, val_len);
++			value[val_len] = '\0';
++			import_define(ctx, name, value);
++		}
++	}
++	else if (was_active && strcmp(word, "undef") == 0)
++	{
++		if (import_get_word_at_p(ctx, &q, name, sizeof(name)))
++			import_undefine(ctx, name);
++	}
++
++	/* #line and #pragma are ignored. */
++
++done:
++	ctx->p = line_end;
++	if (*ctx->p == '\n')
++	{
++		ctx->lineno++;
++		ctx->p++;
++	}
++}
++
++/*
++ * Variants of skip/get that operate on a local pointer without touching
++ * ctx->lineno.  They are used while parsing a single preprocessor line.
++ */
++static void
++import_skip_space_at(ImportScanContext *ctx, const char **pp)
++{
++	(void) ctx;
++	while (**pp && isspace((unsigned char) **pp))
++		(*pp)++;
++}
++
++static bool
++import_get_word_at(const char *p, char *buf, size_t bufsize)
++{
++	size_t			  i = 0;
++
++	while (*p && isspace((unsigned char) *p))
++		p++;
++	if (!*p || !(isalpha((unsigned char) *p) || *p == '_'))
++		return false;
++
++	while (*p && (isalnum((unsigned char) *p) || *p == '_'))
++	{
++		if (i + 1 < bufsize)
++			buf[i++] = *p;
++		p++;
++	}
++	buf[i] = '\0';
++	return true;
++}
++
++static bool
++import_get_word_at_p(ImportScanContext *ctx, const char **pp, char *buf,
++					 size_t bufsize)
++{
++	bool			  result;
++
++	result = import_get_word_at(*pp, buf, bufsize);
++	if (result)
++	{
++		/* Advance past the word we just read. */
++		import_skip_space_at(ctx, pp);
++		while (**pp && (isalnum((unsigned char) **pp) || **pp == '_'))
++			(*pp)++;
++	}
++	return result;
++}
++
++static bool
++import_eval_if_defined(ImportScanContext *ctx, const char *p)
++{
++	bool			  not_flag = false;
++	char			  name[128];
++
++	while (*p && isspace((unsigned char) *p))
++		p++;
++
++	if (*p == '!')
++	{
++		not_flag = true;
++		p++;
++		while (*p && isspace((unsigned char) *p))
++			p++;
++	}
++
++	if (strncmp(p, "defined", 7) == 0 && !isalnum((unsigned char) p[7]) && p[7] != '_')
++	{
++		p += 7;
++		while (*p && isspace((unsigned char) *p))
++			p++;
++		if (*p == '(')
++		{
++			p++;
++			while (*p && isspace((unsigned char) *p))
++				p++;
++		}
++		if (import_get_word_at(p, name, sizeof(name)))
++			return not_flag ? !import_is_defined(ctx, name) : import_is_defined(ctx, name);
++	}
++
++	/* Conservative default: treat unknown expressions as active. */
++	return true;
++}
++
++/*
++ * Conditional-stack helpers.
++ */
++static void
++import_push_cond(ImportScanContext *ctx, bool this_branch_active)
++{
++	bool			  parent_active;
++
++	if (ctx->cond_tos >= MAX_COND_DEPTH - 1)
++		mmfatal(PARSE_ERROR, "too many nested #ifdef conditions in imported header");
++
++	parent_active = ctx->cond_stack[ctx->cond_tos].active;
++	ctx->cond_tos++;
++	ctx->cond_stack[ctx->cond_tos].saw_active = false;
++	ctx->cond_stack[ctx->cond_tos].else_branch = false;
++	ctx->cond_stack[ctx->cond_tos].active =
++		parent_active && !ctx->cond_stack[ctx->cond_tos].saw_active && this_branch_active;
++	ctx->cond_stack[ctx->cond_tos].saw_active = this_branch_active;
++}
++
++static void
++import_switch_cond(ImportScanContext *ctx, bool this_branch_active)
++{
++	bool			  parent_active;
++
++	parent_active = ctx->cond_stack[ctx->cond_tos - 1].active;
++	ctx->cond_stack[ctx->cond_tos].active =
++		parent_active && !ctx->cond_stack[ctx->cond_tos].saw_active && this_branch_active;
++	ctx->cond_stack[ctx->cond_tos].saw_active |= this_branch_active;
++}
++
++static void
++import_else_cond(ImportScanContext *ctx)
++{
++	bool			  parent_active;
++
++	if (ctx->cond_stack[ctx->cond_tos].else_branch)
++		mmfatal(PARSE_ERROR, "more than one #else in imported header");
++
++	ctx->cond_stack[ctx->cond_tos].else_branch = true;
++	parent_active = ctx->cond_stack[ctx->cond_tos - 1].active;
++	ctx->cond_stack[ctx->cond_tos].active =
++		parent_active && !ctx->cond_stack[ctx->cond_tos].saw_active;
++	ctx->cond_stack[ctx->cond_tos].saw_active = true;
++}
++
++static void
++import_pop_cond(ImportScanContext *ctx)
++{
++	if (ctx->cond_tos == 0)
++		mmfatal(PARSE_ERROR, "unmatched #endif in imported header");
++	ctx->cond_tos--;
++}
++
++/*
++ * Local macro table helpers.
++ */
++static void
++import_copy_global_defines(ImportScanContext *ctx)
++{
++	struct _defines *g;
++
++	ctx->defines = NULL;
++	for (g = defines; g != NULL; g = g->next)
++		import_define(ctx, g->name, g->value);
++}
++
++static bool
++import_is_defined(ImportScanContext *ctx, const char *name)
++{
++	ImportDefine	*d;
++
++	for (d = ctx->defines; d; d = d->next)
++	{
++		if (strcmp(d->name, name) == 0)
++			return d->value != NULL;
++	}
++	return false;
++}
++
++static void
++import_define(ImportScanContext *ctx, const char *name, const char *value)
++{
++	ImportDefine	*d;
++
++	for (d = ctx->defines; d; d = d->next)
++	{
++		if (strcmp(d->name, name) == 0)
++		{
++			free(d->value);
++			d->value = value ? strdup(value) : NULL;
++			return;
++		}
++	}
++
++	d = (ImportDefine *) malloc(sizeof(ImportDefine));
++	d->name = strdup(name);
++	d->value = value ? strdup(value) : NULL;
++	d->next = ctx->defines;
++	ctx->defines = d;
++}
++
++static void
++import_undefine(ImportScanContext *ctx, const char *name)
++{
++	ImportDefine	*d;
++
++	for (d = ctx->defines; d; d = d->next)
++	{
++		if (strcmp(d->name, name) == 0)
++		{
++			free(d->value);
++			d->value = NULL;
++			return;
++		}
++	}
++
++	/* Record an explicit undefined entry so future #ifdef sees it. */
++	d = (ImportDefine *) malloc(sizeof(ImportDefine));
++	d->name = strdup(name);
++	d->value = NULL;
++	d->next = ctx->defines;
++	ctx->defines = d;
++}
++
++/*
++ * Determine whether the current position starts a struct/union/enum/typedef
++ * definition that we want to extract.
++ */
++static bool
++import_starts_type_definition(ImportScanContext *ctx)
++{
++	const char		 *p = ctx->p;
++	const char		 *q;
++
++	if (import_is_word_at(p, "struct") ||
++		import_is_word_at(p, "union") ||
++		import_is_word_at(p, "enum"))
++	{
++		/*
++		 * It is a real definition if, after the keyword and optional tag, we
++		 * see '{'.  Forward declarations like "struct foo;" are not extracted.
++		 */
++		q = p;
++		/* skip keyword */
++		while (*q && (isalnum((unsigned char) *q) || *q == '_'))
++			q++;
++		/* skip whitespace */
++		while (*q && isspace((unsigned char) *q))
++			q++;
++		/* skip optional tag */
++		if (*q && (isalpha((unsigned char) *q) || *q == '_'))
++		{
++			while (*q && (isalnum((unsigned char) *q) || *q == '_'))
++				q++;
++			while (*q && isspace((unsigned char) *q))
++				q++;
++		}
++		if (*q == '{')
++			return true;
++		return false;
++	}
++
++	if (import_is_word_at(p, "typedef"))
++		return true;
++
++	return false;
++}
++
++/*
++ * Extract a declaration starting at ctx->p and append it to ctx->decls with a
++ * #line directive.  The caller has already verified that this starts a type
++ * definition.
++ */
++static void
++import_extract_declaration(ImportScanContext *ctx)
++{
++	const char		 *start = ctx->p;
++	const char		 *end;
++	int				 start_line = ctx->lineno;
++	int				 brace = ctx->brace_depth;
++	int				 paren = ctx->paren_depth;
++
++	end = ctx->p;
++	while (*end)
++	{
++		if (end[0] == '/' && end[1] == '*')
++		{
++			import_skip_block_comment_at(&end, &ctx->lineno);
++			continue;
++		}
++		if (end[0] == '/' && end[1] == '/')
++		{
++			import_skip_line_comment_at(&end, &ctx->lineno);
++			continue;
++		}
++		if (*end == '"' || *end == '\'')
++		{
++			import_skip_string_at(&end, *end, &ctx->lineno);
++			continue;
++		}
++
++		if (*end == '{')
++			brace++;
++		else if (*end == '}')
++			brace--;
++		else if (*end == '(')
++			paren++;
++		else if (*end == ')')
++			paren--;
++		else if (*end == ';' && brace == 0 && paren == 0)
++		{
++			end++;
++			break;
++		}
++
++		if (*end == '\n')
++			ctx->lineno++;
++		end++;
++	}
++
++	/* Update global depths in case the declaration spanned lines. */
++	ctx->brace_depth = brace;
++	ctx->paren_depth = paren;
++
++	appendStringInfo(&ctx->decls, "#line %d \"%s\"\n", start_line, ctx->filename);
++	appendBinaryStringInfo(&ctx->decls, start, end - start);
++	appendStringInfoChar(&ctx->decls, '\n');
++
++	ctx->p = end;
++}
++
++/*
++ * The following variants operate on explicit pointers and update lineno via
++ * a pointer, so they can be used during declaration extraction without
++ * disturbing ctx->p.
++ */
++static void
++import_skip_block_comment_at(const char **pp, int *lineno)
++{
++	(*pp) += 2;
++	while (**pp)
++	{
++		if ((*pp)[0] == '*' && (*pp)[1] == '/')
++		{
++			(*pp) += 2;
++			return;
++		}
++		if (**pp == '\n')
++			(*lineno)++;
++		(*pp)++;
++	}
++}
++
++static void
++import_skip_line_comment_at(const char **pp, int *lineno)
++{
++	(void) lineno;
++	(*pp) += 2;
++	while (**pp && **pp != '\n')
++		(*pp)++;
++}
++
++static void
++import_skip_string_at(const char **pp, char quote, int *lineno)
++{
++	(*pp)++;
++	while (**pp)
++	{
++		if (**pp == '\\' && (*pp)[1])
++		{
++			(*pp) += 2;
++			continue;
++		}
++		if (**pp == quote)
++		{
++			(*pp)++;
++			return;
++		}
++		if (**pp == '\n')
++			(*lineno)++;
++		(*pp)++;
++	}
++}
+diff --git a/src/interfaces/ecpg/preproc/preproc_import.h b/src/interfaces/ecpg/preproc/preproc_import.h
+new file mode 100644
+index 0000000..f05545a
+--- /dev/null
++++ b/src/interfaces/ecpg/preproc/preproc_import.h
+@@ -0,0 +1,20 @@
++/*
++ * preproc_import.h
++ *
++ * Tolerant extraction of struct/union/enum/typedef definitions from
++ * C header files included via #include "...", for ECPG host-variable
++ * registration.
++ *
++ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
++ *
++ * src/interfaces/ecpg/preproc/preproc_import.h
++ */
++
++#ifndef PREPROC_IMPORT_H
++#define PREPROC_IMPORT_H
++
++extern bool import_struct_includes;
++
++extern char *ecpg_extract_struct_decls(const char *filename);
++
++#endif							/* PREPROC_IMPORT_H */
+diff --git a/src/interfaces/ecpg/test/preproc/Makefile b/src/interfaces/ecpg/test/preproc/Makefile
+index 39b1974..3208d48 100644
+--- a/src/interfaces/ecpg/test/preproc/Makefile
++++ b/src/interfaces/ecpg/test/preproc/Makefile
+@@ -12,6 +12,7 @@ TESTS = array_of_struct array_of_struct.c \
+ 	init init.c \
+ 	strings strings.c \
+ 	outofscope outofscope.c \
++	import_structs import_structs.c \
+ 	type type.c \
+ 	variable variable.c \
+ 	whenever whenever.c \
+@@ -31,3 +32,6 @@ autoprep.c: autoprep.pgc $(ECPG_TEST_DEPENDENCIES)
+ 
+ strings.c: strings.pgc strings.h $(ECPG_TEST_DEPENDENCIES)
+ 	$(ECPG) -i -o $@ $<
++
++import_structs.c: import_structs.pgc import_structs.h inner_structs.h $(ECPG_TEST_DEPENDENCIES)
++	$(ECPG) --import-struct-includes -o $@ $<
+diff --git a/src/interfaces/ecpg/test/preproc/import_structs.h b/src/interfaces/ecpg/test/preproc/import_structs.h
+new file mode 100644
+index 0000000..04c0a49
+--- /dev/null
++++ b/src/interfaces/ecpg/test/preproc/import_structs.h
+@@ -0,0 +1,25 @@
++#ifndef IMPORT_STRUCTS_H
++#define IMPORT_STRUCTS_H
++
++#include "inner_structs.h"
++
++#ifdef USE_FEATURE
++struct feature_rec
++{
++	int			id;
++	char		name[64];
++};
++typedef struct feature_rec FEATURE_REC;
++#endif
++
++struct mytype
++{
++	int			id;
++	char		t[64];
++	double		d;
++};
++typedef struct mytype MYTYPE;
++
++void		func1(int a, int b);
++
++#endif							/* IMPORT_STRUCTS_H */
+diff --git a/src/interfaces/ecpg/test/preproc/import_structs.pgc b/src/interfaces/ecpg/test/preproc/import_structs.pgc
+new file mode 100644
+index 0000000..15454db
+--- /dev/null
++++ b/src/interfaces/ecpg/test/preproc/import_structs.pgc
+@@ -0,0 +1,22 @@
++#include <stdio.h>
++#include "import_structs.h"
++
++EXEC SQL INCLUDE sqlca;
++
++int
++main(void)
++{
++	EXEC SQL BEGIN DECLARE SECTION;
++	MYTYPE			rec;
++	struct inner_type inner;
++#ifdef USE_FEATURE
++	FEATURE_REC		frec;
++#endif
++	EXEC SQL END DECLARE SECTION;
++
++	printf("sizes: %zu %zu\n", sizeof(rec), sizeof(inner));
++
++	EXEC SQL CONNECT TO tcp:postgresql://localhost/postgres;
++
++	return 0;
++}
+diff --git a/src/interfaces/ecpg/test/preproc/import_structs_debug.log b/src/interfaces/ecpg/test/preproc/import_structs_debug.log
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/interfaces/ecpg/test/preproc/import_structs_debug2.err b/src/interfaces/ecpg/test/preproc/import_structs_debug2.err
+new file mode 100644
+index 0000000..6359576
+--- /dev/null
++++ b/src/interfaces/ecpg/test/preproc/import_structs_debug2.err
+@@ -0,0 +1,1032 @@
++Starting parse
++Entering state 0
++Reducing stack by rule 3463 (line 7941):
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token CPP_LINE (: )
++Shifting token CPP_LINE (: )
++Entering state 36
++Reducing stack by rule 3470 (line 7973):
++   $1 = token CPP_LINE (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token S_ANYTHING (: )
++Shifting token S_ANYTHING (: )
++Entering state 13
++Reducing stack by rule 3876 (line 10065):
++   $1 = token S_ANYTHING (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2
++Entering state 76
++Reducing stack by rule 3864 (line 10053):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token S_ANYTHING (: )
++Shifting token S_ANYTHING (: )
++Entering state 13
++Reducing stack by rule 3876 (line 10065):
++   $1 = token S_ANYTHING (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2
++Entering state 76
++Reducing stack by rule 3864 (line 10053):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token S_ANYTHING (: )
++Shifting token S_ANYTHING (: )
++Entering state 13
++Reducing stack by rule 3876 (line 10065):
++   $1 = token S_ANYTHING (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: [import] resolving 'import_structs.h' -> '/home/wln/source/wlnPg/src/interfaces/ecpg/test/preproc/import_structs.h'
++[import] resolving 'inner_structs.h' -> '/home/wln/source/wlnPg/src/interfaces/ecpg/test/preproc/inner_structs.h'
++[import] extracting at /home/wln/source/wlnPg/src/interfaces/ecpg/test/preproc/inner_structs.h:4
++[import] extracting at /home/wln/source/wlnPg/src/interfaces/ecpg/test/preproc/import_structs.h:15
++[import] extracting at /home/wln/source/wlnPg/src/interfaces/ecpg/test/preproc/import_structs.h:21
++--- extracted from import_structs.h ---
++#line 4 "/home/wln/source/wlnPg/src/interfaces/ecpg/test/preproc/inner_structs.h"
++struct inner_type
++{
++	short		s;
++};
++#line 15 "/home/wln/source/wlnPg/src/interfaces/ecpg/test/preproc/import_structs.h"
++struct mytype
++{
++	int			id;
++	char		t[64];
++	double		d;
++};
++#line 21 "/home/wln/source/wlnPg/src/interfaces/ecpg/test/preproc/import_structs.h"
++typedef struct mytype MYTYPE;
++
++---
++Next token is token SQL_START (: )
++Shifting token SQL_START (: )
++Entering state 8
++Reducing stack by rule 3829 (line 9881):
++   $1 = token SQL_START (: )
++-> $$ = nterm ecpgstart (: )
++Stack now 0 2
++Entering state 73
++Reading a token: Next token is token BEGIN_P (: )
++Shifting token BEGIN_P (: )
++Entering state 105
++Reading a token: Next token is token DECLARE (: )
++Shifting token DECLARE (: )
++Entering state 1004
++Reading a token: Next token is token SQL_SECTION (: )
++Shifting token SQL_SECTION (: )
++Entering state 1433
++Reading a token: Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 2239
++Reducing stack by rule 3535 (line 8460):
++   $1 = nterm ecpgstart (: )
++   $2 = token BEGIN_P (: )
++   $3 = token DECLARE (: )
++   $4 = token SQL_SECTION (: )
++   $5 = token ';' (: )
++-> $$ = nterm sql_startdeclare (: )
++Stack now 0 2
++Entering state 72
++Reducing stack by rule 3533 (line 8450):
++-> $$ = nterm $@3 (: )
++Stack now 0 2 72
++Entering state 79
++Reading a token: Next token is token CPP_LINE (: )
++Shifting token CPP_LINE (: )
++Entering state 337
++Reducing stack by rule 3540 (line 8475):
++   $1 = token CPP_LINE (: )
++-> $$ = nterm vt_declarations (: )
++Stack now 0 2 72 79
++Entering state 340
++Reading a token: Next token is token SQL_STRUCT (: )
++Shifting token SQL_STRUCT (: )
++Entering state 88
++Reading a token: Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2 72 79 340 88
++Entering state 944
++Reducing stack by rule 3803 (line 9832):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm ECPGColLabel (: )
++Stack now 0 2 72 79 340 88
++Entering state 941
++Reducing stack by rule 3792 (line 9819):
++   $1 = nterm ECPGColLabel (: )
++-> $$ = nterm ColLabel (: )
++Stack now 0 2 72 79 340 88
++Entering state 940
++Reducing stack by rule 3770 (line 9774):
++   $1 = nterm ColLabel (: )
++-> $$ = nterm symbol (: )
++Stack now 0 2 72 79 340 88
++Entering state 939
++Reducing stack by rule 3587 (line 8945):
++   $1 = token SQL_STRUCT (: )
++   $2 = nterm symbol (: )
++-> $$ = nterm s_struct_union_symbol (: )
++Stack now 0 2 72 79 340
++Entering state 315
++Reading a token: Next token is token '{' (: )
++Reducing stack by rule 3582 (line 8872):
++-> $$ = nterm $@7 (: )
++Stack now 0 2 72 79 340 315
++Entering state 1301
++Next token is token '{' (: )
++Shifting token '{' (: )
++Entering state 1955
++Reading a token: Next token is token SQL_SHORT (: )
++Reducing stack by rule 3613 (line 9002):
++-> $$ = nterm opt_signed (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 319
++Next token is token SQL_SHORT (: )
++Shifting token SQL_SHORT (: )
++Entering state 1305
++Reading a token: Next token is token IDENT (: )
++Reducing stack by rule 3602 (line 8989):
++   $1 = token SQL_SHORT (: )
++-> $$ = nterm signed_type (: )
++Stack now 0 2 72 79 340 315 1301 1955 319
++Entering state 1309
++Reducing stack by rule 3592 (line 8975):
++   $1 = nterm opt_signed (: )
++   $2 = nterm signed_type (: )
++-> $$ = nterm simple_type (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 317
++Reducing stack by rule 3563 (line 8553):
++   $1 = nterm simple_type (: )
++-> $$ = nterm var_type (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 311
++Reducing stack by rule 3549 (line 8517):
++-> $$ = nterm $@6 (: )
++Stack now 0 2 72 79 340 315 1301 1955 311
++Entering state 1299
++Next token is token IDENT (: )
++Reducing stack by rule 3619 (line 9134):
++-> $$ = nterm opt_pointer (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299
++Entering state 1954
++Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954
++Entering state 944
++Reducing stack by rule 3803 (line 9832):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm ECPGColLabel (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954
++Entering state 3223
++Reducing stack by rule 1984 (line 5913):
++-> $$ = nterm opt_array_bounds (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954 3223
++Entering state 4077
++Reading a token: Next token is token ';' (: )
++Reducing stack by rule 3553 (line 8535):
++-> $$ = nterm opt_bit_field (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954 3223 4077
++Entering state 4895
++Next token is token ';' (: )
++Reducing stack by rule 3617 (line 9127):
++-> $$ = nterm opt_initializer (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954 3223 4077 4895
++Entering state 5516
++Reducing stack by rule 3616 (line 9015):
++   $1 = nterm opt_pointer (: )
++   $2 = nterm ECPGColLabel (: )
++   $3 = nterm opt_array_bounds (: )
++   $4 = nterm opt_bit_field (: )
++   $5 = nterm opt_initializer (: )
++-> $$ = nterm variable (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299
++Entering state 1953
++Reducing stack by rule 3614 (line 9005):
++   $1 = nterm variable (: )
++-> $$ = nterm variable_list (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299
++Entering state 1952
++Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 3222
++Reducing stack by rule 3550 (line 8516):
++   $1 = nterm var_type (: )
++   $2 = nterm $@6 (: )
++   $3 = nterm variable_list (: )
++   $4 = token ';' (: )
++-> $$ = nterm var_declaration (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 3225
++Reducing stack by rule 3543 (line 8480):
++   $1 = nterm var_declaration (: )
++-> $$ = nterm variable_declarations (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 3224
++Reading a token: Next token is token '}' (: )
++Shifting token '}' (: )
++Entering state 4078
++Reducing stack by rule 3583 (line 8871):
++   $1 = nterm s_struct_union_symbol (: )
++   $2 = nterm $@7 (: )
++   $3 = token '{' (: )
++   $4 = nterm variable_declarations (: )
++   $5 = token '}' (: )
++-> $$ = nterm struct_union_type_with_symbol (: )
++Stack now 0 2 72 79 340
++Entering state 313
++Reading a token: Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 1300
++Reducing stack by rule 3551 (line 8531):
++   $1 = nterm struct_union_type_with_symbol (: )
++   $2 = token ';' (: )
++-> $$ = nterm var_declaration (: )
++Stack now 0 2 72 79 340
++Entering state 307
++Reducing stack by rule 3524 (line 8426):
++   $1 = nterm var_declaration (: )
++-> $$ = nterm single_vt_declaration (: )
++Stack now 0 2 72 79 340
++Entering state 1313
++Reducing stack by rule 3541 (line 8476):
++   $1 = nterm vt_declarations (: )
++   $2 = nterm single_vt_declaration (: )
++-> $$ = nterm vt_declarations (: )
++Stack now 0 2 72 79
++Entering state 340
++Reading a token: Next token is token CPP_LINE (: )
++Shifting token CPP_LINE (: )
++Entering state 1312
++Reducing stack by rule 3542 (line 8477):
++   $1 = nterm vt_declarations (: )
++   $2 = token CPP_LINE (: )
++-> $$ = nterm vt_declarations (: )
++Stack now 0 2 72 79
++Entering state 340
++Reading a token: Next token is token SQL_STRUCT (: )
++Shifting token SQL_STRUCT (: )
++Entering state 88
++Reading a token: Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2 72 79 340 88
++Entering state 944
++Reducing stack by rule 3803 (line 9832):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm ECPGColLabel (: )
++Stack now 0 2 72 79 340 88
++Entering state 941
++Reducing stack by rule 3792 (line 9819):
++   $1 = nterm ECPGColLabel (: )
++-> $$ = nterm ColLabel (: )
++Stack now 0 2 72 79 340 88
++Entering state 940
++Reducing stack by rule 3770 (line 9774):
++   $1 = nterm ColLabel (: )
++-> $$ = nterm symbol (: )
++Stack now 0 2 72 79 340 88
++Entering state 939
++Reducing stack by rule 3587 (line 8945):
++   $1 = token SQL_STRUCT (: )
++   $2 = nterm symbol (: )
++-> $$ = nterm s_struct_union_symbol (: )
++Stack now 0 2 72 79 340
++Entering state 315
++Reading a token: Next token is token '{' (: )
++Reducing stack by rule 3582 (line 8872):
++-> $$ = nterm $@7 (: )
++Stack now 0 2 72 79 340 315
++Entering state 1301
++Next token is token '{' (: )
++Shifting token '{' (: )
++Entering state 1955
++Reading a token: Next token is token INT_P (: )
++Reducing stack by rule 3613 (line 9002):
++-> $$ = nterm opt_signed (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 319
++Next token is token INT_P (: )
++Shifting token INT_P (: )
++Entering state 1308
++Reducing stack by rule 3604 (line 8991):
++   $1 = token INT_P (: )
++-> $$ = nterm signed_type (: )
++Stack now 0 2 72 79 340 315 1301 1955 319
++Entering state 1309
++Reducing stack by rule 3592 (line 8975):
++   $1 = nterm opt_signed (: )
++   $2 = nterm signed_type (: )
++-> $$ = nterm simple_type (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 317
++Reducing stack by rule 3563 (line 8553):
++   $1 = nterm simple_type (: )
++-> $$ = nterm var_type (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 311
++Reducing stack by rule 3549 (line 8517):
++-> $$ = nterm $@6 (: )
++Stack now 0 2 72 79 340 315 1301 1955 311
++Entering state 1299
++Reading a token: Next token is token IDENT (: )
++Reducing stack by rule 3619 (line 9134):
++-> $$ = nterm opt_pointer (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299
++Entering state 1954
++Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954
++Entering state 944
++Reducing stack by rule 3803 (line 9832):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm ECPGColLabel (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954
++Entering state 3223
++Reducing stack by rule 1984 (line 5913):
++-> $$ = nterm opt_array_bounds (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954 3223
++Entering state 4077
++Reading a token: Next token is token ';' (: )
++Reducing stack by rule 3553 (line 8535):
++-> $$ = nterm opt_bit_field (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954 3223 4077
++Entering state 4895
++Next token is token ';' (: )
++Reducing stack by rule 3617 (line 9127):
++-> $$ = nterm opt_initializer (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299 1954 3223 4077 4895
++Entering state 5516
++Reducing stack by rule 3616 (line 9015):
++   $1 = nterm opt_pointer (: )
++   $2 = nterm ECPGColLabel (: )
++   $3 = nterm opt_array_bounds (: )
++   $4 = nterm opt_bit_field (: )
++   $5 = nterm opt_initializer (: )
++-> $$ = nterm variable (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299
++Entering state 1953
++Reducing stack by rule 3614 (line 9005):
++   $1 = nterm variable (: )
++-> $$ = nterm variable_list (: )
++Stack now 0 2 72 79 340 315 1301 1955 311 1299
++Entering state 1952
++Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 3222
++Reducing stack by rule 3550 (line 8516):
++   $1 = nterm var_type (: )
++   $2 = nterm $@6 (: )
++   $3 = nterm variable_list (: )
++   $4 = token ';' (: )
++-> $$ = nterm var_declaration (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 3225
++Reducing stack by rule 3543 (line 8480):
++   $1 = nterm var_declaration (: )
++-> $$ = nterm variable_declarations (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 3224
++Reading a token: Next token is token CHAR_P (: )
++Reducing stack by rule 3613 (line 9002):
++-> $$ = nterm opt_signed (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224
++Entering state 319
++Next token is token CHAR_P (: )
++Shifting token CHAR_P (: )
++Entering state 1306
++Reducing stack by rule 3610 (line 8997):
++   $1 = token CHAR_P (: )
++-> $$ = nterm signed_type (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 319
++Entering state 1309
++Reducing stack by rule 3592 (line 8975):
++   $1 = nterm opt_signed (: )
++   $2 = nterm signed_type (: )
++-> $$ = nterm simple_type (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224
++Entering state 317
++Reducing stack by rule 3563 (line 8553):
++   $1 = nterm simple_type (: )
++-> $$ = nterm var_type (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224
++Entering state 311
++Reducing stack by rule 3549 (line 8517):
++-> $$ = nterm $@6 (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311
++Entering state 1299
++Reading a token: Next token is token IDENT (: )
++Reducing stack by rule 3619 (line 9134):
++-> $$ = nterm opt_pointer (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299
++Entering state 1954
++Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954
++Entering state 944
++Reducing stack by rule 3803 (line 9832):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm ECPGColLabel (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954
++Entering state 3223
++Reducing stack by rule 1984 (line 5913):
++-> $$ = nterm opt_array_bounds (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223
++Entering state 4077
++Reading a token: Next token is token '[' (: )
++Shifting token '[' (: )
++Entering state 3707
++Reading a token: Next token is token ICONST (: )
++Shifting token ICONST (: )
++Entering state 40
++Reducing stack by rule 2500 (line 6928):
++   $1 = token ICONST (: )
++-> $$ = nterm Iconst (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223 4077 3707
++Entering state 4577
++Reducing stack by rule 3924 (line 10131):
++   $1 = nterm Iconst (: )
++-> $$ = nterm Iresult (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223 4077 3707
++Entering state 4580
++Reading a token: Next token is token ']' (: )
++Shifting token ']' (: )
++Entering state 5280
++Reducing stack by rule 1983 (line 5902):
++   $1 = nterm opt_array_bounds (: )
++   $2 = token '[' (: )
++   $3 = nterm Iresult (: )
++   $4 = token ']' (: )
++-> $$ = nterm opt_array_bounds (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223
++Entering state 4077
++Reading a token: Next token is token ';' (: )
++Reducing stack by rule 3553 (line 8535):
++-> $$ = nterm opt_bit_field (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223 4077
++Entering state 4895
++Next token is token ';' (: )
++Reducing stack by rule 3617 (line 9127):
++-> $$ = nterm opt_initializer (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223 4077 4895
++Entering state 5516
++Reducing stack by rule 3616 (line 9015):
++   $1 = nterm opt_pointer (: )
++   $2 = nterm ECPGColLabel (: )
++   $3 = nterm opt_array_bounds (: )
++   $4 = nterm opt_bit_field (: )
++   $5 = nterm opt_initializer (: )
++-> $$ = nterm variable (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299
++Entering state 1953
++Reducing stack by rule 3614 (line 9005):
++   $1 = nterm variable (: )
++-> $$ = nterm variable_list (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299
++Entering state 1952
++Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 3222
++Reducing stack by rule 3550 (line 8516):
++   $1 = nterm var_type (: )
++   $2 = nterm $@6 (: )
++   $3 = nterm variable_list (: )
++   $4 = token ';' (: )
++-> $$ = nterm var_declaration (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224
++Entering state 4079
++Reducing stack by rule 3544 (line 8481):
++   $1 = nterm variable_declarations (: )
++   $2 = nterm var_declaration (: )
++-> $$ = nterm variable_declarations (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 3224
++Reading a token: Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 99
++Reading a token: Next token is token IDENT (: )
++Reducing stack by rule 2056 (line 6069):
++-> $$ = nterm opt_interval (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 99
++Entering state 961
++Reducing stack by rule 3528 (line 8439):
++   $1 = nterm opt_interval (: )
++-> $$ = nterm ecpg_interval (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 99
++Entering state 963
++Reducing stack by rule 3576 (line 8708):
++   $1 = token IDENT (: )
++   $2 = nterm ecpg_interval (: )
++-> $$ = nterm var_type (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224
++Entering state 311
++Reducing stack by rule 3549 (line 8517):
++-> $$ = nterm $@6 (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311
++Entering state 1299
++Next token is token IDENT (: )
++Reducing stack by rule 3619 (line 9134):
++-> $$ = nterm opt_pointer (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299
++Entering state 1954
++Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954
++Entering state 944
++Reducing stack by rule 3803 (line 9832):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm ECPGColLabel (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954
++Entering state 3223
++Reducing stack by rule 1984 (line 5913):
++-> $$ = nterm opt_array_bounds (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223
++Entering state 4077
++Reading a token: Next token is token ';' (: )
++Reducing stack by rule 3553 (line 8535):
++-> $$ = nterm opt_bit_field (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223 4077
++Entering state 4895
++Next token is token ';' (: )
++Reducing stack by rule 3617 (line 9127):
++-> $$ = nterm opt_initializer (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299 1954 3223 4077 4895
++Entering state 5516
++Reducing stack by rule 3616 (line 9015):
++   $1 = nterm opt_pointer (: )
++   $2 = nterm ECPGColLabel (: )
++   $3 = nterm opt_array_bounds (: )
++   $4 = nterm opt_bit_field (: )
++   $5 = nterm opt_initializer (: )
++-> $$ = nterm variable (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299
++Entering state 1953
++Reducing stack by rule 3614 (line 9005):
++   $1 = nterm variable (: )
++-> $$ = nterm variable_list (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224 311 1299
++Entering state 1952
++Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 3222
++Reducing stack by rule 3550 (line 8516):
++   $1 = nterm var_type (: )
++   $2 = nterm $@6 (: )
++   $3 = nterm variable_list (: )
++   $4 = token ';' (: )
++-> $$ = nterm var_declaration (: )
++Stack now 0 2 72 79 340 315 1301 1955 3224
++Entering state 4079
++Reducing stack by rule 3544 (line 8481):
++   $1 = nterm variable_declarations (: )
++   $2 = nterm var_declaration (: )
++-> $$ = nterm variable_declarations (: )
++Stack now 0 2 72 79 340 315 1301 1955
++Entering state 3224
++Reading a token: Next token is token '}' (: )
++Shifting token '}' (: )
++Entering state 4078
++Reducing stack by rule 3583 (line 8871):
++   $1 = nterm s_struct_union_symbol (: )
++   $2 = nterm $@7 (: )
++   $3 = token '{' (: )
++   $4 = nterm variable_declarations (: )
++   $5 = token '}' (: )
++-> $$ = nterm struct_union_type_with_symbol (: )
++Stack now 0 2 72 79 340
++Entering state 313
++Reading a token: Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 1300
++Reducing stack by rule 3551 (line 8531):
++   $1 = nterm struct_union_type_with_symbol (: )
++   $2 = token ';' (: )
++-> $$ = nterm var_declaration (: )
++Stack now 0 2 72 79 340
++Entering state 307
++Reducing stack by rule 3524 (line 8426):
++   $1 = nterm var_declaration (: )
++-> $$ = nterm single_vt_declaration (: )
++Stack now 0 2 72 79 340
++Entering state 1313
++Reducing stack by rule 3541 (line 8476):
++   $1 = nterm vt_declarations (: )
++   $2 = nterm single_vt_declaration (: )
++-> $$ = nterm vt_declarations (: )
++Stack now 0 2 72 79
++Entering state 340
++Reading a token: Next token is token CPP_LINE (: )
++Shifting token CPP_LINE (: )
++Entering state 1312
++Reducing stack by rule 3542 (line 8477):
++   $1 = nterm vt_declarations (: )
++   $2 = token CPP_LINE (: )
++-> $$ = nterm vt_declarations (: )
++Stack now 0 2 72 79
++Entering state 340
++Reading a token: Next token is token S_TYPEDEF (: )
++Shifting token S_TYPEDEF (: )
++Entering state 98
++Reducing stack by rule 3545 (line 8485):
++-> $$ = nterm $@4 (: )
++Stack now 0 2 72 79 340 98
++Entering state 953
++Reading a token: Next token is token SQL_STRUCT (: )
++Shifting token SQL_STRUCT (: )
++Entering state 88
++Reading a token: Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2 72 79 340 98 953 88
++Entering state 944
++Reducing stack by rule 3803 (line 9832):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm ECPGColLabel (: )
++Stack now 0 2 72 79 340 98 953 88
++Entering state 941
++Reducing stack by rule 3792 (line 9819):
++   $1 = nterm ECPGColLabel (: )
++-> $$ = nterm ColLabel (: )
++Stack now 0 2 72 79 340 98 953 88
++Entering state 940
++Reducing stack by rule 3770 (line 9774):
++   $1 = nterm ColLabel (: )
++-> $$ = nterm symbol (: )
++Stack now 0 2 72 79 340 98 953 88
++Entering state 939
++Reducing stack by rule 3587 (line 8945):
++   $1 = token SQL_STRUCT (: )
++   $2 = nterm symbol (: )
++-> $$ = nterm s_struct_union_symbol (: )
++Stack now 0 2 72 79 340 98 953
++Entering state 315
++Reading a token: Next token is token IDENT (: )
++Reducing stack by rule 3577 (line 8828):
++   $1 = nterm s_struct_union_symbol (: )
++-> $$ = nterm var_type (: )
++Stack now 0 2 72 79 340 98 953
++Entering state 1343
++Next token is token IDENT (: )
++Reducing stack by rule 3619 (line 9134):
++-> $$ = nterm opt_pointer (: )
++Stack now 0 2 72 79 340 98 953 1343
++Entering state 2000
++Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2 72 79 340 98 953 1343 2000
++Entering state 944
++Reducing stack by rule 3803 (line 9832):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm ECPGColLabel (: )
++Stack now 0 2 72 79 340 98 953 1343 2000
++Entering state 3251
++Reducing stack by rule 1984 (line 5913):
++-> $$ = nterm opt_array_bounds (: )
++Stack now 0 2 72 79 340 98 953 1343 2000 3251
++Entering state 4094
++Reading a token: Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 4903
++Reducing stack by rule 3546 (line 8484):
++   $1 = token S_TYPEDEF (: )
++   $2 = nterm $@4 (: )
++   $3 = nterm var_type (: )
++   $4 = nterm opt_pointer (: )
++   $5 = nterm ECPGColLabel (: )
++   $6 = nterm opt_array_bounds (: )
++   $7 = token ';' (: )
++-> $$ = nterm type_declaration (: )
++Stack now 0 2 72 79 340
++Entering state 306
++Reducing stack by rule 3523 (line 8425):
++   $1 = nterm type_declaration (: )
++-> $$ = nterm single_vt_declaration (: )
++Stack now 0 2 72 79 340
++Entering state 1313
++Reducing stack by rule 3541 (line 8476):
++   $1 = nterm vt_declarations (: )
++   $2 = nterm single_vt_declaration (: )
++-> $$ = nterm vt_declarations (: )
++Stack now 0 2 72 79
++Entering state 340
++Reading a token: Next token is token SQL_START (: )
++Reducing stack by rule 3538 (line 8471):
++   $1 = nterm vt_declarations (: )
++-> $$ = nterm var_type_declarations (: )
++Stack now 0 2 72 79
++Entering state 339
++Next token is token SQL_START (: )
++Shifting token SQL_START (: )
++Entering state 8
++Reducing stack by rule 3829 (line 9881):
++   $1 = token SQL_START (: )
++-> $$ = nterm ecpgstart (: )
++Stack now 0 2 72 79 339
++Entering state 1311
++Reading a token: Next token is token END_P (: )
++Shifting token END_P (: )
++Entering state 1960
++Reading a token: Next token is token DECLARE (: )
++Shifting token DECLARE (: )
++Entering state 3228
++Reading a token: Next token is token SQL_SECTION (: )
++Shifting token SQL_SECTION (: )
++Entering state 4081
++Reading a token: Next token is token ';' (: )
++Shifting token ';' (: )
++Entering state 4896
++Reducing stack by rule 3536 (line 8465):
++   $1 = nterm ecpgstart (: )
++   $2 = token END_P (: )
++   $3 = token DECLARE (: )
++   $4 = token SQL_SECTION (: )
++   $5 = token ';' (: )
++-> $$ = nterm sql_enddeclare (: )
++Stack now 0 2 72 79 339
++Entering state 1310
++Reducing stack by rule 3534 (line 8449):
++   $1 = nterm sql_startdeclare (: )
++   $2 = nterm $@3 (: )
++   $3 = nterm var_type_declarations (: )
++   $4 = nterm sql_enddeclare (: )
++-> $$ = nterm ECPGDeclaration (: )
++Stack now 0 2
++Entering state 71
++Reducing stack by rule 3468 (line 7968):
++   $1 = nterm ECPGDeclaration (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token IDENT (: )
++Shifting token IDENT (: )
++Entering state 37
++Reducing stack by rule 3846 (line 10001):
++   $1 = token IDENT (: )
++-> $$ = nterm ecpg_ident (: )
++Stack now 0 2
++Entering state 76
++Reducing stack by rule 3864 (line 10053):
++   $1 = nterm ecpg_ident (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token S_ANYTHING (: )
++Shifting token S_ANYTHING (: )
++Entering state 13
++Reducing stack by rule 3876 (line 10065):
++   $1 = token S_ANYTHING (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token S_ANYTHING (: )
++Shifting token S_ANYTHING (: )
++Entering state 13
++Reducing stack by rule 3876 (line 10065):
++   $1 = token S_ANYTHING (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token S_ANYTHING (: )
++Shifting token S_ANYTHING (: )
++Entering state 13
++Reducing stack by rule 3876 (line 10065):
++   $1 = token S_ANYTHING (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: Next token is token S_ANYTHING (: )
++Shifting token S_ANYTHING (: )
++Entering state 13
++Reducing stack by rule 3876 (line 10065):
++   $1 = token S_ANYTHING (: )
++-> $$ = nterm c_anything (: )
++Stack now 0 2
++Entering state 78
++Reducing stack by rule 3859 (line 10042):
++   $1 = nterm c_anything (: )
++-> $$ = nterm c_thing (: )
++Stack now 0 2
++Entering state 77
++Reducing stack by rule 3469 (line 7969):
++   $1 = nterm c_thing (: )
++-> $$ = nterm statement (: )
++Stack now 0 2
++Entering state 70
++Reducing stack by rule 3464 (line 7942):
++   $1 = nterm statements (: )
++   $2 = nterm statement (: )
++-> $$ = nterm statements (: )
++Stack now 0
++Entering state 2
++Reading a token: 
+\ No newline at end of file
+diff --git a/src/interfaces/ecpg/test/preproc/import_structs_debug2.log b/src/interfaces/ecpg/test/preproc/import_structs_debug2.log
+new file mode 100644
+index 0000000..e69de29
+diff --git a/src/interfaces/ecpg/test/preproc/inner_structs.h b/src/interfaces/ecpg/test/preproc/inner_structs.h
+new file mode 100644
+index 0000000..12e4800
+--- /dev/null
++++ b/src/interfaces/ecpg/test/preproc/inner_structs.h
+@@ -0,0 +1,9 @@
++#ifndef INNER_STRUCTS_H
++#define INNER_STRUCTS_H
++
++struct inner_type
++{
++	short		s;
++};
++
++#endif							/* INNER_STRUCTS_H */
+diff --git a/src/interfaces/ecpg/test/preproc/manual_decl.c b/src/interfaces/ecpg/test/preproc/manual_decl.c
+new file mode 100644
+index 0000000..319f278
+--- /dev/null
++++ b/src/interfaces/ecpg/test/preproc/manual_decl.c
+@@ -0,0 +1,38 @@
++/* Processed by ecpg (regression mode) */
++/* These include files are added by the preprocessor */
++#include <ecpglib.h>
++#include <ecpgerrno.h>
++#include <sqlca.h>
++/* End of automatic include section */
++#define ECPGdebug(X,Y) ECPGdebug((X)+100,(Y))
++
++#line 1 "manual_decl.pgc"
++/* exec sql begin declare section */
++     
++         
++   typedef struct mytype  MYTYPE ;
++
++#line 4 "manual_decl.pgc"
++
++struct inner_type { 
++#line 2 "manual_decl.pgc"
++ short s ;
++ } ; struct mytype { 
++#line 3 "manual_decl.pgc"
++ int id ;
++ 
++#line 3 "manual_decl.pgc"
++ char t [ 64 ] ;
++ 
++#line 3 "manual_decl.pgc"
++ double d ;
++ } ;/* exec sql end declare section */
++#line 5 "manual_decl.pgc"
++
++
++int main(void) { /* exec sql begin declare section */   
++#line 7 "manual_decl.pgc"
++ MYTYPE rec ;
++/* exec sql end declare section */
++#line 7 "manual_decl.pgc"
++ return 0; }
+diff --git a/src/interfaces/ecpg/test/preproc/manual_decl.pgc b/src/interfaces/ecpg/test/preproc/manual_decl.pgc
+new file mode 100644
+index 0000000..c733434
+--- /dev/null
++++ b/src/interfaces/ecpg/test/preproc/manual_decl.pgc
+@@ -0,0 +1,7 @@
++EXEC SQL BEGIN DECLARE SECTION;
++struct inner_type { short s; };
++struct mytype { int id; char t[64]; double d; };
++typedef struct mytype MYTYPE;
++EXEC SQL END DECLARE SECTION;
++
++int main(void) { EXEC SQL BEGIN DECLARE SECTION; MYTYPE rec; EXEC SQL END DECLARE SECTION; return 0; }
+diff --git a/src/interfaces/ecpg/test/preproc/simple_import.pgc b/src/interfaces/ecpg/test/preproc/simple_import.pgc
+new file mode 100644
+index 0000000..bda18cc
+--- /dev/null
++++ b/src/interfaces/ecpg/test/preproc/simple_import.pgc
+@@ -0,0 +1,6 @@
++#include "import_structs.h"
++
++int main(void)
++{
++	return 0;
++}
