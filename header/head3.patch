@@ -1,0 +1,282 @@
+diff --git a/src/interfaces/ecpg/preproc/pgc.l b/src/interfaces/ecpg/preproc/pgc.l
+index 51d8af5..f181d2b 100644
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -28,8 +28,6 @@
+ #include "preproc_extern.h"
+ #include "preproc.h"
+ #include "preproc_import.h"
+-
+-#define YY_USER_INIT import_check_output_restore();
+ }
+ 
+ %{
+@@ -57,13 +55,19 @@ static int	parenths_open;
+ /* Used to tell parse_include() whether the command was #include or #include_next */
+ static bool include_next;
+ 
++/* State for suppressing parser output during --import-struct-includes */
++static FILE *import_saved_yyout = NULL;
++static FILE *import_suppress_yyout = NULL;
++static YY_BUFFER_STATE import_reg_buffer = NULL;
++static bool import_output_suppressed = false;
++
+ #define startlit()	(literalbuf[0] = '\0', literallen = 0)
+ static void addlit(char *ytext, int yleng);
+ static void addlitchar(unsigned char ychar);
+ static int	process_integer_literal(const char *token, YYSTYPE *lval, int base);
+ static void parse_include(void);
++static void parse_include_by_name(const char *filename);
+ static void process_include_for_structs(const char *yytext);
+-static void import_check_output_restore(void);
+ static bool ecpg_isspace(char ch);
+ static bool isdefine(void);
+ static bool isinformixdefine(void);
+@@ -1122,6 +1126,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					ECHO;
+ 				}
+ <C>{space}*#{include}{space}+"\""[^\"]*"\""{space}*{newline} {
++						fprintf(stderr, "[import] #include rule matched at lineno=%d yytext=|%s|\n", yylineno, yytext);
+ 						if (import_struct_includes)
+ 						{
+ 							ECHO;
+@@ -1129,8 +1134,33 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						}
+ 						else
+ 						{
+-							base_yylval.str = loc_strdup(yytext);
+-							return CPP_LINE;
++							bool			processed = false;
++
++							if (system_includes)
++							{
++								char		filename[MAXPGPATH];
++								const char *p = strchr(yytext, '"');
++
++								if (p)
++								{
++									const char *start = p + 1;
++									const char *end = strchr(start, '"');
++
++									if (end && end - start < MAXPGPATH)
++									{
++										memcpy(filename, start, end - start);
++										filename[end - start] = '\0';
++										parse_include_by_name(filename);
++										processed = true;
++									}
++								}
++							}
++
++							if (!processed)
++							{
++								base_yylval.str = loc_strdup(yytext);
++								return CPP_LINE;
++							}
+ 						}
+ 					}
+ <C>{cppinclude}	{
+@@ -1599,6 +1629,22 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 							}
+ 						}
+ 
++						/*
++						 * If we are finishing the synthetic declaration buffer
++						 * used by --import-struct-includes, restore the original
++						 * output stream before switching back to the real input.
++						 */
++						if (import_output_suppressed &&
++							YY_CURRENT_BUFFER == import_reg_buffer)
++						{
++							fprintf(stderr, "[import] EOF of synthetic buffer, restoring output\n");
++							fclose(import_suppress_yyout);
++							base_yyout = import_saved_yyout;
++							import_output_suppressed = false;
++							import_reg_buffer = NULL;
++							import_suppress_yyout = NULL;
++						}
++
+ 						if (yyin != NULL)
+ 							fclose(yyin);
+ 
+@@ -1817,29 +1863,86 @@ parse_include(void)
+ }
+ 
+ /*
+- * Support for --import-struct-includes: when a #include "..." is seen,
+- * extract struct/union/enum/typedef declarations from the header and feed
+- * them to the parser so ECPG registers the types.  The original #include line
+- * is echoed normally; parser output during registration is suppressed so the
+- * declarations are not duplicated in the generated .c file.
++ * Open a quoted include file by name and switch the scanner to it.
++ * This is used by the --import-struct-includes fallback when standard -i
++ * processing is required.
+  */
+-static YY_BUFFER_STATE import_reg_buffer = NULL;
+-static FILE *import_saved_yyout = NULL;
+-static bool import_output_suppressed = false;
+-
+ static void
+-import_check_output_restore(void)
++parse_include_by_name(const char *filename)
+ {
+-	if (import_output_suppressed && YY_CURRENT_BUFFER != import_reg_buffer)
++	struct _yy_buffer *yb;
++	struct _include_path *ip;
++	char			inc_file[MAXPGPATH];
++	FILE		   *fp = NULL;
++
++	/*
++	 * First try the filename as-is (relative to current directory or
++	 * absolute).
++	 */
++	strlcpy(inc_file, filename, sizeof(inc_file));
++	fp = fopen(inc_file, "r");
++	if (!fp)
+ 	{
+-		if (base_yyout)
+-			fclose(base_yyout);
+-		base_yyout = import_saved_yyout;
+-		import_output_suppressed = false;
+-		import_reg_buffer = NULL;
++		if (strlen(inc_file) <= 2 ||
++			strcmp(inc_file + strlen(inc_file) - 2, ".h") != 0)
++		{
++			strlcat(inc_file, ".h", sizeof(inc_file));
++			fp = fopen(inc_file, "r");
++		}
+ 	}
++
++	/*
++	 * For Informix compatibility, also search the include paths for quoted
++	 * includes.  This matches parse_include().
++	 */
++	if (!fp &&
++		(compat == ECPG_COMPAT_INFORMIX || compat == ECPG_COMPAT_INFORMIX_SE))
++	{
++		for (ip = include_paths; fp == NULL && ip != NULL; ip = ip->next)
++		{
++			if (strlen(ip->path) + strlen(filename) + 4 > MAXPGPATH)
++			{
++				fprintf(stderr, _("Error: include path \"%s/%s\" is too long on line %d, skipping\n"), ip->path, filename, yylineno);
++				continue;
++			}
++			snprintf(inc_file, sizeof(inc_file), "%s/%s", ip->path, filename);
++			fp = fopen(inc_file, "r");
++			if (!fp)
++			{
++				if (strcmp(inc_file + strlen(inc_file) - 2, ".h") != 0)
++				{
++					strlcat(inc_file, ".h", sizeof(inc_file));
++					fp = fopen(inc_file, "r");
++				}
++			}
++		}
++	}
++
++	if (!fp)
++		mmfatal(NO_INCLUDE_FILE, "could not open include file \"%s\" on line %d", filename, yylineno);
++
++	yb = mm_alloc(sizeof(struct _yy_buffer));
++	yb->buffer = YY_CURRENT_BUFFER;
++	yb->lineno = yylineno;
++	yb->filename = input_filename;
++	yb->next = yy_buffer;
++	yy_buffer = yb;
++
++	input_filename = mm_strdup(inc_file);
++	yy_switch_to_buffer(yy_create_buffer(fp, YY_BUF_SIZE));
++	yylineno = 1;
++	output_line_number();
++
++	BEGIN(C);
+ }
+ 
++/*
++ * Support for --import-struct-includes: when a #include "..." is seen,
++ * extract struct/union/enum/typedef declarations from the header and feed
++ * them to the parser so ECPG registers the types.  The original #include line
++ * is echoed normally; parser output during registration is suppressed so the
++ * declarations are not duplicated in the generated .c file.
++ */
+ static void
+ process_include_for_structs(const char *yytext)
+ {
+@@ -1866,33 +1969,43 @@ process_include_for_structs(const char *yytext)
+ 	if (!decls || !decls[0])
+ 		return;
+ 
+-	fprintf(stderr, "--- extracted from %s ---\n%s\n---\n", filename, decls);
+-
+ 	wrapped = (char *) mm_alloc(strlen(decls) + 128);
+ 	sprintf(wrapped,
+ 			"EXEC SQL BEGIN DECLARE SECTION;\n"
+ 			"%s"
+ 			"EXEC SQL END DECLARE SECTION;\n",
+ 			decls);
+-	fprintf(stderr, "--- wrapped ---\n%s\n---\n", wrapped);
+ 
+-	/* Suppress parser output while the synthetic declarations are parsed. */
++	/* Echo the original #include line to the generated .c file. */
++	ECHO;
++
++	/*
++	 * Feed the wrapped declarations to the parser as if they came from a
++	 * nested include file so ECPG registers the types.  Parser output is
++	 * redirected to a scratch stream while the synthetic declarations are
++	 * scanned; base_yyout is restored when the synthetic buffer ends.
++	 */
++	import_suppress_yyout = tmpfile();
++	if (!import_suppress_yyout)
++		mmfatal(NO_INCLUDE_FILE, "could not create temp file for import suppression");
++
+ 	import_saved_yyout = base_yyout;
+-	base_yyout = tmpfile();
+-	if (!base_yyout)
+-		mmfatal(NO_INCLUDE_FILE, "could not create temp file for import");
++	base_yyout = import_suppress_yyout;
+ 
+-	yb = (struct _yy_buffer *) mm_alloc(sizeof(struct _yy_buffer));
+-	yb->buffer = yy_scan_string(wrapped);
++	yb = mm_alloc(sizeof(struct _yy_buffer));
++	yb->buffer = YY_CURRENT_BUFFER;
+ 	yb->lineno = yylineno;
+-	yb->filename = mm_strdup(input_filename);
++	yb->filename = input_filename;
+ 	yb->next = yy_buffer;
+ 	yy_buffer = yb;
+ 
+-	yy_switch_to_buffer(yb->buffer);
+-	yylineno = 1;
+-	free(input_filename);
+ 	input_filename = mm_strdup(filename);
++	yylineno = 1;
++	fprintf(stderr, "[import] switching to synthetic buffer, saved filename=%s saved lineno=%ld wrapped=|%s|\n",
++			yb->filename, (long) yb->lineno, wrapped);
++	yy_scan_string(wrapped);
++	output_line_number();
++
+ 	import_reg_buffer = YY_CURRENT_BUFFER;
+ 	import_output_suppressed = true;
+ 
+diff --git a/src/interfaces/ecpg/preproc/preproc_import.c b/src/interfaces/ecpg/preproc/preproc_import.c
+index 003e293..8d86231 100644
+--- a/src/interfaces/ecpg/preproc/preproc_import.c
++++ b/src/interfaces/ecpg/preproc/preproc_import.c
+@@ -173,6 +173,7 @@ import_scan_file(ImportScanContext *ctx, const char *filename)
+ 	char			*resolved;
+ 	char			*content;
+ 	const char		*saved_filename;
++	int				 saved_lineno;
+ 
+ 	resolved = import_resolve_include(ctx, filename, true);
+ 	if (!resolved)
+@@ -195,7 +196,7 @@ import_scan_file(ImportScanContext *ctx, const char *filename)
+ 	}
+ 
+ 	saved_filename = ctx->filename;
+-	int				saved_lineno = ctx->lineno;
++	saved_lineno = ctx->lineno;
+ 	import_scan_content(ctx, content, resolved);
+ 	ctx->filename = saved_filename;
+ 	ctx->lineno = saved_lineno;
