@@ -1,0 +1,712 @@
+commit e99d063652968ab79f7f36cdeb5ae63b8d49769c
+Author: wangln@sina.cn <wangln@sina.cn>
+Date:   Wed Jun 17 10:56:40 2026 -0700
+
+    fix: support ifdef
+
+diff --git a/src/interfaces/ecpg/preproc/pgc.l b/src/interfaces/ecpg/preproc/pgc.l
+index 96eb076..d89b7a3 100644
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -31,6 +31,11 @@
+ 
+ %{
+ 
++#define C_IFDEF_IFDEF  1
++#define C_IFDEF_IFNDEF 2
++#define C_IFDEF_ELIF   3
++#define C_IFDEF_IF     4
++
+ /* LCOV_EXCL_START */
+ 
+ extern YYSTYPE base_yylval;
+@@ -63,6 +68,19 @@ static bool ecpg_isspace(char ch);
+ static bool isdefine(void);
+ static bool isinformixdefine(void);
+ 
++/* C 原生 #ifdef 支持辅助函数 */
++static bool is_cpp_cond_line(const char *line, char **macro_name, int *cond_type);
++static bool is_cpp_else_line(const char *line);
++static bool is_cpp_endif_line(const char *line);
++static bool is_cpp_define_line(const char *line, char **name, char **value);
++static bool is_macro_defined(const char *name);
++static bool eval_cpp_if_expr(const char *expr);
++static void process_cpp_if(int cond_type, char **macro_name, int default_state);
++static void process_cpp_else(int default_state);
++static void process_cpp_endif(int default_state);
++static void output_cppline(void);
++static void process_cpp_define(const char *name);
++
+ char	   *token_start;
+ 
+ /* vars to keep track of start conditions when scanning literals */
+@@ -107,8 +125,17 @@ static struct _if_value
+ 	bool		active;
+ 	bool		saw_active;
+ 	bool		else_branch;
++	bool		is_cpp;
+ } stacked_if_value[MAX_NESTED_IF];
+ 
++/* Separate list for C preprocessor macros, so they are not expanded
++ * by ECPG's EXEC SQL DEFINE machinery. */
++static struct _cpp_defines
++{
++	char		*name;
++	struct _cpp_defines *next;
++} *cpp_defines = NULL;
++
+ %}
+ 
+ %option 8bit
+@@ -458,8 +485,7 @@ cppinclude_next		{space}*#{include_next}{space}*
+ /* and then the other commands starting with "i", we have to add these
+  * separately because the cppline production would match on "include" too
+  */
+-cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+\/)|.|\\{space}*{newline})*{newline}
+-
++cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+\/)|.|\\{space}*{newline})*
+ %%
+ 
+ %{
+@@ -1141,8 +1167,32 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					}
+ 				}
+ <C,SQL>{cppline} {
+-					base_yylval.str = loc_strdup(yytext);
+-					return CPP_LINE;
++					//base_yylval.str = loc_strdup(yytext);
++					//return CPP_LINE;
++					char *macro_name = NULL;
++					int cond_type = 0;
++					char *def_name = NULL;
++					char *def_value = NULL;
++					
++					if (is_cpp_cond_line(yytext, &macro_name, &cond_type)) {
++						process_cpp_if(cond_type, &macro_name, C);
++					}
++					else if (is_cpp_else_line(yytext)) {
++						process_cpp_else(C);
++					}
++					else if (is_cpp_endif_line(yytext)) {
++						process_cpp_endif(C);
++					}
++					else if (is_cpp_define_line(yytext, &def_name, &def_value)) {
++						process_cpp_define(def_name);
++						free(def_name);
++						free(def_value);
++						output_cppline();
++					}
++					else {
++						base_yylval.str = loc_strdup(yytext);
++						return CPP_LINE;
++					}
+ 				}
+ <C>{identifier}	{
+ 					/*
+@@ -1293,6 +1343,33 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						return S_ANYTHING;
+ 					}
+ 				}
++
++<xskip>{cppline} {
++					char *macro_name = NULL;
++					int cond_type = 0;
++					char *def_name = NULL;
++					char *def_value = NULL;
++					
++					if (is_cpp_cond_line(yytext, &macro_name, &cond_type)) {
++						process_cpp_if(cond_type, &macro_name, C);
++					}
++					else if (is_cpp_else_line(yytext)) {
++						process_cpp_else(C);
++					}
++					else if (is_cpp_endif_line(yytext)) {
++						process_cpp_endif(C);
++					}
++					else if (is_cpp_define_line(yytext, &def_name, &def_value)) {
++						process_cpp_define(def_name);
++						free(def_name);
++						free(def_value);
++						output_cppline();
++					}
++					else {
++						fputs(yytext, yyout);
++					}
++				}
++
+ <C,xskip>{exec_sql}{ifdef}{space}* {
+ 					if (preproc_tos >= MAX_NESTED_IF - 1)
+ 						mmfatal(PARSE_ERROR, "too many nested EXEC SQL IFDEF conditions");
+@@ -1300,6 +1377,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					stacked_if_value[preproc_tos].active = false;
+ 					stacked_if_value[preproc_tos].saw_active = false;
+ 					stacked_if_value[preproc_tos].else_branch = false;
++					stacked_if_value[preproc_tos].is_cpp = false;
+ 					ifcond = true;
+ 					BEGIN(xcond);
+ 				}
+@@ -1313,6 +1391,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						stacked_if_value[preproc_tos].active = false;
+ 						stacked_if_value[preproc_tos].saw_active = false;
+ 						stacked_if_value[preproc_tos].else_branch = false;
++						stacked_if_value[preproc_tos].is_cpp = false;
+ 						ifcond = true;
+ 						BEGIN(xcond);
+ 					}
+@@ -1329,6 +1408,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					stacked_if_value[preproc_tos].active = false;
+ 					stacked_if_value[preproc_tos].saw_active = false;
+ 					stacked_if_value[preproc_tos].else_branch = false;
++					stacked_if_value[preproc_tos].is_cpp = false;
+ 					ifcond = false;
+ 					BEGIN(xcond);
+ 				}
+@@ -1342,6 +1422,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						stacked_if_value[preproc_tos].active = false;
+ 						stacked_if_value[preproc_tos].saw_active = false;
+ 						stacked_if_value[preproc_tos].else_branch = false;
++						stacked_if_value[preproc_tos].is_cpp = false;
+ 						ifcond = false;
+ 						BEGIN(xcond);
+ 					}
+@@ -1355,7 +1436,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					if (preproc_tos == 0)
+ 						mmfatal(PARSE_ERROR, "missing matching \"EXEC SQL IFDEF\" / \"EXEC SQL IFNDEF\"");
+ 					if (stacked_if_value[preproc_tos].else_branch)
+-						mmfatal(PARSE_ERROR, "missing \"EXEC SQL ENDIF;\"");
++						mmfatal(PARSE_ERROR, "missing \"EXEC SQL ENDIF1;\"");
+ 					ifcond = true;
+ 					BEGIN(xcond);
+ 				}
+@@ -1366,7 +1447,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						if (preproc_tos == 0)
+ 							mmfatal(PARSE_ERROR, "missing matching \"EXEC SQL IFDEF\" / \"EXEC SQL IFNDEF\"");
+ 						if (stacked_if_value[preproc_tos].else_branch)
+-							mmfatal(PARSE_ERROR, "missing \"EXEC SQL ENDIF;\"");
++							mmfatal(PARSE_ERROR, "missing \"EXEC SQL ENDIF2;\"");
+ 						ifcond = true;
+ 						BEGIN(xcond);
+ 					}
+@@ -1427,7 +1508,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 				}
+ <C,xskip>{exec_sql}{endif}{space}*";" {
+ 					if (preproc_tos == 0)
+-						mmfatal(PARSE_ERROR, "unmatched EXEC SQL ENDIF");
++						mmfatal(PARSE_ERROR, "unmatched EXEC SQL ENDIF3");
+ 					else
+ 						preproc_tos--;
+ 
+@@ -1441,7 +1522,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					if (INFORMIX_MODE)
+ 					{
+ 						if (preproc_tos == 0)
+-							mmfatal(PARSE_ERROR, "unmatched EXEC SQL ENDIF");
++							mmfatal(PARSE_ERROR, "unmatched EXEC SQL ENDIF4");
+ 						else
+ 							preproc_tos--;
+ 
+@@ -1457,7 +1538,9 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					}
+ 				}
+ 
+-<xskip>{other}	{ /* ignore */ }
++<xskip>{other}	{					if (preproc_tos > 0 && stacked_if_value[preproc_tos].is_cpp)
++						fputs(yytext, yyout);
++				}
+ 
+ <xcond>{identifier}{space}*";" {
+ 					{
+@@ -1561,7 +1644,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						if (preproc_tos > 0)
+ 						{
+ 							preproc_tos = 0;
+-							mmfatal(PARSE_ERROR, "missing \"EXEC SQL ENDIF;\"");
++							mmfatal(PARSE_ERROR, "missing \"EXEC SQL ENDIF5;\"");
+ 						}
+ 						yyterminate();
+ 					}
+@@ -1626,6 +1709,7 @@ lex_init(void)
+ 	stacked_if_value[preproc_tos].active = true;
+ 	stacked_if_value[preproc_tos].saw_active = true;
+ 	stacked_if_value[preproc_tos].else_branch = false;
++	stacked_if_value[preproc_tos].is_cpp = false;
+ 
+ 	/* initialize literal buffer to a reasonable but expansible size */
+ 	if (literalbuf == NULL)
+@@ -1893,3 +1977,476 @@ isinformixdefine(void)
+ 
+ 	return false;
+ }
++
++/* 辅助函数：输出 cppline 内容，无换行符时自动补全 */
++static void output_cppline(void)
++{
++    fputs(yytext, yyout);
++}
++
++/* 处理 #if / #ifdef / #ifndef / #elif */
++static void process_cpp_if(int cond_type, char **macro_name, int default_state)
++{
++    bool defined;
++    bool condition_true;
++    bool is_ifdef = (cond_type == C_IFDEF_IFDEF);
++    bool is_ifndef = (cond_type == C_IFDEF_IFNDEF);
++    bool is_elif = (cond_type == C_IFDEF_ELIF);
++    
++    if (is_elif) {
++        if (preproc_tos <= 0)
++            mmfatal(PARSE_ERROR, "#elif without #ifdef");
++        if (stacked_if_value[preproc_tos].else_branch)
++            mmfatal(PARSE_ERROR, "#elif after #else");
++    } else {
++        if (preproc_tos >= MAX_NESTED_IF - 1)
++            mmfatal(PARSE_ERROR, "too many nested #ifdef conditions");
++        
++        preproc_tos++;
++        stacked_if_value[preproc_tos].active = false;
++        stacked_if_value[preproc_tos].saw_active = false;
++        stacked_if_value[preproc_tos].else_branch = false;
++					stacked_if_value[preproc_tos].is_cpp = true;
++    }
++    
++    if (is_ifdef)
++        defined = is_macro_defined(*macro_name);
++    else if (is_ifndef)
++        defined = !is_macro_defined(*macro_name);
++    else /* elif 或 if */
++        defined = eval_cpp_if_expr(*macro_name);
++    
++    bool outer_active = (preproc_tos <= 0) || 
++                        stacked_if_value[preproc_tos - 1].active;
++    bool this_active = outer_active && defined;
++    
++    if (is_elif && stacked_if_value[preproc_tos].saw_active)
++        this_active = false;
++    
++    if (this_active)
++        stacked_if_value[preproc_tos].saw_active = true;
++    stacked_if_value[preproc_tos].active = this_active;
++    
++    output_cppline();
++    
++    if (this_active)
++        BEGIN(default_state);
++    else
++        BEGIN(xskip);
++    
++    free(*macro_name);
++    *macro_name = NULL;
++}
++
++/* 处理 #else */
++static void process_cpp_else(int default_state)
++{
++    if (preproc_tos <= 0)
++        mmfatal(PARSE_ERROR, "unmatched #else");
++    if (stacked_if_value[preproc_tos].else_branch)
++        mmfatal(PARSE_ERROR, "duplicate #else");
++    
++    stacked_if_value[preproc_tos].else_branch = true;
++    
++    bool outer_active = (preproc_tos <= 0) || 
++                        stacked_if_value[preproc_tos - 1].active;
++    bool any_taken = stacked_if_value[preproc_tos].saw_active;
++    bool this_active = outer_active && !any_taken;
++    
++    stacked_if_value[preproc_tos].active = this_active;
++    if (this_active)
++        stacked_if_value[preproc_tos].saw_active = true;
++    
++    output_cppline();
++    
++    if (this_active)
++        BEGIN(default_state);
++    else
++        BEGIN(xskip);
++}
++
++/* 处理 #endif */
++static void process_cpp_endif(int default_state)
++{
++    if (preproc_tos <= 0)
++        mmfatal(PARSE_ERROR, "unmatched #endif");
++    
++    preproc_tos--;
++    
++    output_cppline();
++    
++    bool active = (preproc_tos <= 0) || 
++                  stacked_if_value[preproc_tos].active;
++    if (active)
++        BEGIN(default_state);
++    else
++        BEGIN(xskip);
++}
++ 
++ static bool
++ eval_cpp_if_expr(const char *expr)
++ {
++     const char *p = expr;
++     bool result = false;
++     bool pending_and = false;
++     bool pending_or = false;
++     bool negate_next = false;
++     
++     while (*p) {
++         while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
++             p++;
++         
++         if (!*p)
++             break;
++         
++         if (*p == '!') {
++             negate_next = !negate_next;
++             p++;
++             continue;
++         }
++         
++         if (*p == '(') {
++             p++;
++             const char *start = p;
++             int depth = 1;
++             while (*p && depth > 0) {
++                 if (*p == '(') depth++;
++                 else if (*p == ')') depth--;
++                 p++;
++             }
++             if (depth > 0)
++                 return false;
++             
++             int len = p - start - 1;
++             char *subexpr = (char *) mm_alloc(len + 1);
++             strncpy(subexpr, start, len);
++             subexpr[len] = '\0';
++             
++             bool subresult = eval_cpp_if_expr(subexpr);
++             if (negate_next) {
++                 subresult = !subresult;
++                 negate_next = false;
++             }
++             
++             if (pending_and) {
++                 result = result && subresult;
++                 pending_and = false;
++             } else if (pending_or) {
++                 result = result || subresult;
++                 pending_or = false;
++             } else {
++                 result = subresult;
++             }
++             
++             free(subexpr);
++             continue;
++         }
++         
++         if (strncmp(p, "defined", 7) == 0 && 
++             !isalnum((unsigned char)p[7]) && p[7] != '_') {
++             p += 7;
++             while (*p && (*p == ' ' || *p == '\t')) p++;
++             
++             if (*p != '(')
++                 return false;
++             p++;
++             
++             const char *start = p;
++             while (*p && (isalnum((unsigned char)*p) || *p == '_'))
++                 p++;
++             int len = p - start;
++             if (len <= 0)
++                 return false;
++             
++             char *name = (char *) mm_alloc(len + 1);
++             strncpy(name, start, len);
++             name[len] = '\0';
++             
++             bool defined = is_macro_defined(name);
++             if (negate_next) {
++                 defined = !defined;
++                 negate_next = false;
++             }
++             
++             if (pending_and) {
++                 result = result && defined;
++                 pending_and = false;
++             } else if (pending_or) {
++                 result = result || defined;
++                 pending_or = false;
++             } else {
++                 result = defined;
++             }
++             
++             free(name);
++             
++             while (*p && (*p == ' ' || *p == '\t')) p++;
++             if (*p == ')') p++;
++             continue;
++         }
++         
++         if (*p == '&' && *(p+1) == '&') {
++             pending_and = true;
++             p += 2;
++             continue;
++         }
++         
++         if (*p == '|' && *(p+1) == '|') {
++             pending_or = true;
++             p += 2;
++             continue;
++         }
++         
++         /* 检查简单宏名（如 XX2） */
++         if (isalnum((unsigned char)*p) || *p == '_') {
++             const char *start = p;
++             while (*p && (isalnum((unsigned char)*p) || *p == '_'))
++                 p++;
++             int len = p - start;
++             char *name = (char *) mm_alloc(len + 1);
++             strncpy(name, start, len);
++             name[len] = '\0';
++             
++             bool defined = is_macro_defined(name);
++             if (negate_next) {
++                 defined = !defined;
++                 negate_next = false;
++             }
++             
++             if (pending_and) {
++                 result = result && defined;
++                 pending_and = false;
++             } else if (pending_or) {
++                 result = result || defined;
++                 pending_or = false;
++             } else {
++                 result = defined;
++             }
++             
++             free(name);
++             continue;
++         }
++         
++         p++;
++     }
++     
++     return result;
++ }
++
++ static bool
++ is_macro_defined(const char *name)
++ {
++     struct _cpp_defines *cppptr;
++     struct _defines *defptr;
++     
++     for (cppptr = cpp_defines; cppptr; cppptr = cppptr->next) {
++         if (strcmp(name, cppptr->name) == 0)
++             return true;
++     }
++     
++     for (defptr = defines; defptr; defptr = defptr->next) {
++         if (strcmp(name, defptr->name) == 0 && defptr->value != NULL)
++             return true;
++     }
++     return false;
++ }
++
++static bool
++is_cpp_cond_line(const char *line, char **macro_name, int *cond_type)
++{
++    const char *p = line;
++    
++    /* 跳过前导空白 */
++    while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\f' || *p == '\v' || *p == '\n'))
++        p++;
++    
++    /* 检查 # */
++    if (*p != '#')
++        return false;
++    p++;
++    
++    /* 跳过 # 后的空白 */
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++    
++    /* 检查 #ifdef */
++    if (strncmp(p, "ifdef", 5) == 0 && 
++        !isalnum((unsigned char)p[5]) && p[5] != '_') {
++        *cond_type = C_IFDEF_IFDEF;
++        p += 5;
++    }
++    /* 检查 #ifndef */
++    else if (strncmp(p, "ifndef", 6) == 0 && 
++             !isalnum((unsigned char)p[6]) && p[6] != '_') {
++        *cond_type = C_IFDEF_IFNDEF;
++        p += 6;
++    }
++    /* 检查 #elif */
++    else if (strncmp(p, "elif", 4) == 0 && 
++             !isalnum((unsigned char)p[4]) && p[4] != '_') {
++        *cond_type = C_IFDEF_ELIF;
++        p += 4;
++    }
++    /* 检查 #if */
++    else if (strncmp(p, "if", 2) == 0 && 
++             !isalnum((unsigned char)p[2]) && p[2] != '_') {
++        *cond_type = C_IFDEF_IF;
++        p += 2;
++    }
++    else {
++        return false;
++    }
++    
++    /* 跳过指令后的空白 */
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++    
++    if (*cond_type == C_IFDEF_IF || *cond_type == C_IFDEF_ELIF) {
++        /* #if / #elif: 提取完整表达式到行尾（去掉尾部空白） */
++        const char *start = p;
++        while (*p && *p != '\n' && *p != '\r')
++            p++;
++        
++        int len = p - start;
++        while (len > 0 && (start[len-1] == ' ' || start[len-1] == '\t'))
++            len--;
++        
++        if (len <= 0) {
++            *macro_name = mm_strdup("1");  /* 空表达式默认真 */
++        } else {
++            *macro_name = (char *) mm_alloc(len + 1);
++            strncpy(*macro_name, start, len);
++            (*macro_name)[len] = '\0';
++        }
++    } else {
++        /* #ifdef / #ifndef: 简单宏名 */
++        const char *start = p;
++        while (*p && (isalnum((unsigned char)*p) || *p == '_'))
++            p++;
++        
++        int len = p - start;
++        if (len <= 0)
++            return false;
++        
++        *macro_name = (char *) mm_alloc(len + 1);
++        strncpy(*macro_name, start, len);
++        (*macro_name)[len] = '\0';
++    }
++    
++    return true;
++}
++
++static bool
++is_cpp_else_line(const char *line)
++{
++    const char *p = line;
++    
++    while (*p && ecpg_isspace(*p))
++        p++;
++    
++    if (*p != '#')
++        return false;
++    p++;
++    
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++    
++    return (strncmp(p, "else", 4) == 0 && 
++            !isalnum((unsigned char)p[4]) && p[4] != '_');
++}
++
++static bool
++is_cpp_endif_line(const char *line)
++{
++    const char *p = line;
++    
++    while (*p && ecpg_isspace(*p))
++        p++;
++    
++    if (*p != '#')
++        return false;
++    p++;
++    
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++    
++    return (strncmp(p, "endif", 5) == 0 && 
++            !isalnum((unsigned char)p[5]) && p[5] != '_');
++}
++static bool
++is_cpp_define_line(const char *line, char **name, char **value)
++{
++    const char *p = line;
++    const char *start;
++    int len;
++
++    while (*p && ecpg_isspace(*p))
++        p++;
++
++    if (*p != '#')
++        return false;
++    p++;
++
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++
++    if (strncmp(p, "define", 6) != 0 ||
++        (isalnum((unsigned char)p[6]) || p[6] == '_'))
++        return false;
++    p += 6;
++
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++
++    start = p;
++    if (!(isalpha((unsigned char)*p) || *p == '_'))
++        return false;
++    p++;
++    while (*p && (isalnum((unsigned char)*p) || *p == '_'))
++        p++;
++
++    len = p - start;
++    *name = (char *) mm_alloc(len + 1);
++    strncpy(*name, start, len);
++    (*name)[len] = '\0';
++
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++
++    if (*p == '\0' || *p == '\n' || *p == '\r')
++    {
++        *value = mm_strdup("");
++    }
++    else
++    {
++        const char *vstart = p;
++        while (*p && *p != '\n' && *p != '\r')
++            p++;
++        len = p - vstart;
++        while (len > 0 && (vstart[len - 1] == ' ' || vstart[len - 1] == '\t'))
++            len--;
++        *value = (char *) mm_alloc(len + 1);
++        strncpy(*value, vstart, len);
++        (*value)[len] = '\0';
++    }
++
++    return true;
++}
++
++static void
++process_cpp_define(const char *name)
++{
++    struct _cpp_defines *ptr;
++
++    for (ptr = cpp_defines; ptr != NULL; ptr = ptr->next)
++    {
++        if (strcmp(name, ptr->name) == 0)
++            return;
++    }
++
++    ptr = (struct _cpp_defines *) mm_alloc(sizeof(struct _cpp_defines));
++    ptr->name = mm_strdup(name);
++    ptr->next = cpp_defines;
++    cpp_defines = ptr;
++}
++
