@@ -1,0 +1,209 @@
+commit 0eeaf288e72e8d10bb40fb62f095b72fd79c0740
+Author: wangln@sina.cn <wangln@sina.cn>
+Date:   Wed Jun 17 11:32:39 2026 -0700
+
+    fix: #ifdef in EXEC SQL sql_str
+
+diff --git a/src/interfaces/ecpg/preproc/pgc.l b/src/interfaces/ecpg/preproc/pgc.l
+index 8e0bcb0..ce506cf 100644
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -126,6 +126,7 @@ static struct _if_value
+ 	bool		saw_active;
+ 	bool		else_branch;
+ 	bool		is_cpp;
++	int			return_state;	/* state to resume when this branch is active */
+ } stacked_if_value[MAX_NESTED_IF];
+ 
+ /* Separate list for C preprocessor macros, so they are not expanded
+@@ -196,6 +197,7 @@ static struct _cpp_defines
+ %x xus
+ %x xcond
+ %x xskip
++%x xsqlskip
+ 
+ /* Additional exclusive states that are specific to ECPG */
+ %x C SQL incl def def_ident undef
+@@ -1175,13 +1177,13 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					char *def_value = NULL;
+ 					
+ 					if (is_cpp_cond_line(yytext, &macro_name, &cond_type)) {
+-						process_cpp_if(cond_type, &macro_name, C);
++						process_cpp_if(cond_type, &macro_name, YYSTATE);
+ 					}
+ 					else if (is_cpp_else_line(yytext)) {
+-						process_cpp_else(C);
++						process_cpp_else(YYSTATE);
+ 					}
+ 					else if (is_cpp_endif_line(yytext)) {
+-						process_cpp_endif(C);
++						process_cpp_endif(YYSTATE);
+ 					}
+ 					else if (is_cpp_define_line(yytext, &def_name, &def_value)) {
+ 						process_cpp_define(def_name, def_value);
+@@ -1378,6 +1380,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					stacked_if_value[preproc_tos].saw_active = false;
+ 					stacked_if_value[preproc_tos].else_branch = false;
+ 					stacked_if_value[preproc_tos].is_cpp = false;
++					stacked_if_value[preproc_tos].return_state = C;
+ 					ifcond = true;
+ 					BEGIN(xcond);
+ 				}
+@@ -1392,6 +1395,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						stacked_if_value[preproc_tos].saw_active = false;
+ 						stacked_if_value[preproc_tos].else_branch = false;
+ 						stacked_if_value[preproc_tos].is_cpp = false;
++						stacked_if_value[preproc_tos].return_state = C;
+ 						ifcond = true;
+ 						BEGIN(xcond);
+ 					}
+@@ -1409,6 +1413,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					stacked_if_value[preproc_tos].saw_active = false;
+ 					stacked_if_value[preproc_tos].else_branch = false;
+ 					stacked_if_value[preproc_tos].is_cpp = false;
++					stacked_if_value[preproc_tos].return_state = C;
+ 					ifcond = false;
+ 					BEGIN(xcond);
+ 				}
+@@ -1423,6 +1428,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						stacked_if_value[preproc_tos].saw_active = false;
+ 						stacked_if_value[preproc_tos].else_branch = false;
+ 						stacked_if_value[preproc_tos].is_cpp = false;
++						stacked_if_value[preproc_tos].return_state = C;
+ 						ifcond = false;
+ 						BEGIN(xcond);
+ 					}
+@@ -1538,6 +1544,41 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 					}
+ 				}
+ 
++<xsqlskip>{
++{cppline}		{
++						char *macro_name = NULL;
++						int cond_type = 0;
++						char *def_name = NULL;
++						char *def_value = NULL;
++
++						if (is_cpp_cond_line(yytext, &macro_name, &cond_type)) {
++							process_cpp_if(cond_type, &macro_name, SQL);
++						}
++						else if (is_cpp_else_line(yytext)) {
++							process_cpp_else(SQL);
++						}
++						else if (is_cpp_endif_line(yytext)) {
++							process_cpp_endif(SQL);
++						}
++						else if (is_cpp_define_line(yytext, &def_name, &def_value)) {
++							process_cpp_define(def_name, def_value);
++							free(def_name);
++							free(def_value);
++							/* do not output inside skipped SQL */
++						}
++						/* ignore other cpp lines (e.g. #pragma, #error) */
++					}
++{whitespace}	{
++						/* ignore */
++					}
++{other}			{
++						/* ignore skipped SQL tokens */
++					}
++<<EOF>>			{
++						mmfatal(PARSE_ERROR, "unterminated #ifdef condition inside EXEC SQL statement");
++					}
++} /* <xsqlskip> */
++
+ <xskip>{other}	{					if (preproc_tos > 0 && stacked_if_value[preproc_tos].is_cpp)
+ 						fputs(yytext, yyout);
+ 				}
+@@ -1710,6 +1751,7 @@ lex_init(void)
+ 	stacked_if_value[preproc_tos].saw_active = true;
+ 	stacked_if_value[preproc_tos].else_branch = false;
+ 	stacked_if_value[preproc_tos].is_cpp = false;
++	stacked_if_value[preproc_tos].return_state = C;
+ 
+ 	/* initialize literal buffer to a reasonable but expansible size */
+ 	if (literalbuf == NULL)
+@@ -1978,10 +2020,12 @@ isinformixdefine(void)
+ 	return false;
+ }
+ 
+-/* 辅助函数：输出 cppline 内容，无换行符时自动补全 */
++/* 辅助函数：输出 cppline 内容，在 SQL 语句内部时补全换行 */
+ static void output_cppline(void)
+ {
+     fputs(yytext, yyout);
++    if (YYSTATE == SQL || YYSTATE == xsqlskip)
++        fputc('\n', yyout);
+ }
+ 
+ /* 处理 #if / #ifdef / #ifndef / #elif */
+@@ -1992,6 +2036,7 @@ static void process_cpp_if(int cond_type, char **macro_name, int default_state)
+     bool is_ifdef = (cond_type == C_IFDEF_IFDEF);
+     bool is_ifndef = (cond_type == C_IFDEF_IFNDEF);
+     bool is_elif = (cond_type == C_IFDEF_ELIF);
++    int skip_state = (default_state == SQL) ? xsqlskip : xskip;
+     
+     if (is_elif) {
+         if (preproc_tos <= 0)
+@@ -2007,6 +2052,7 @@ static void process_cpp_if(int cond_type, char **macro_name, int default_state)
+         stacked_if_value[preproc_tos].saw_active = false;
+         stacked_if_value[preproc_tos].else_branch = false;
+ 					stacked_if_value[preproc_tos].is_cpp = true;
++        stacked_if_value[preproc_tos].return_state = default_state;
+     }
+     
+     if (is_ifdef)
+@@ -2032,7 +2078,7 @@ static void process_cpp_if(int cond_type, char **macro_name, int default_state)
+     if (this_active)
+         BEGIN(default_state);
+     else
+-        BEGIN(xskip);
++        BEGIN(skip_state);
+     
+     free(*macro_name);
+     *macro_name = NULL;
+@@ -2060,27 +2106,36 @@ static void process_cpp_else(int default_state)
+     output_cppline();
+     
+     if (this_active)
+-        BEGIN(default_state);
++        BEGIN(stacked_if_value[preproc_tos].return_state);
+     else
+-        BEGIN(xskip);
++    {
++        int skip_state = (stacked_if_value[preproc_tos].return_state == SQL) ? xsqlskip : xskip;
++        BEGIN(skip_state);
++    }
+ }
+ 
+ /* 处理 #endif */
+ static void process_cpp_endif(int default_state)
+ {
++    int return_state;
++
+     if (preproc_tos <= 0)
+         mmfatal(PARSE_ERROR, "unmatched #endif");
+-    
++
++    return_state = stacked_if_value[preproc_tos].return_state;
+     preproc_tos--;
+-    
++
+     output_cppline();
+-    
+-    bool active = (preproc_tos <= 0) || 
++
++    bool active = (preproc_tos <= 0) ||
+                   stacked_if_value[preproc_tos].active;
+     if (active)
+-        BEGIN(default_state);
++        BEGIN(return_state);
+     else
+-        BEGIN(xskip);
++    {
++        int skip_state = (stacked_if_value[preproc_tos].return_state == SQL) ? xsqlskip : xskip;
++        BEGIN(skip_state);
++    }
+ }
+  
+  static bool
