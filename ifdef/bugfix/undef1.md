@@ -1153,3 +1153,410 @@ for (cppptr = cpp_defines; cppptr; cppptr = cppptr->next) {
 | `#ifdef A1` (未定义) → `#define XX1` → `#endif` → `#ifdef XX1` | 选 `else` 分支 | `xskip` 状态下 `active=false`，`#define` 不执行，`is_macro_defined` 返回 false ✓ |
 | `ecpg -DXX1` → `#undef XX1` → `#ifdef XX1` | 选 `ifdef` 分支（命令行定义不受 `#undef` 影响） | `cmdvalue="1"` 保留，`is_macro_defined` 返回 true ✓ |
 
+
+
+ecpg -DXX1 → #undef XX1 → #ifdef XX1 ,预期 选 ifdef 分支（
+：：这个预期不对， 你要按照c 语言逻辑来理解。 gcc -DXX1 , 若代码中有 #undef XX1 , 最后使用#ifdef XX1 判断时 仍是未定义XX1
+
+你说得对，我按 C 预处理器语义重新修正。
+
+## C 预处理器语义
+
+`gcc -DXX1` 等价于代码最开头加了 `#define XX1`。如果后续有 `#undef XX1`，那么 `#ifdef XX1` 应该返回 **false**。
+
+所以 `ecpg -DXX1` 后遇到 `#undef XX1`，应该完全取消定义，后续 `#ifdef XX1` 走 `else` 分支。
+
+## 修正方案
+
+`process_cpp_undef` 对 `defines` 列表中的宏，无论 `cmdvalue` 是否存在，都应该**彻底删除节点**，而不是保留 `cmdvalue`。
+
+```diff
+ static void
+ process_cpp_undef(const char *name)
+ {
+     struct _cpp_defines *cptr, *cptr_prev = NULL;
+     struct _defines *dptr, *dptr_prev = NULL;
+ 
+     /* Remove from cpp_defines list */
+     for (cptr = cpp_defines; cptr != NULL; cptr_prev = cptr, cptr = cptr->next)
+     {
+         if (strcmp(name, cptr->name) == 0)
+         {
+             if (cptr_prev == NULL)
+                 cpp_defines = cptr->next;
+             else
+                 cptr_prev->next = cptr->next;
+             free(cptr->name);
+             free(cptr);
+             break;
+         }
+     }
+ 
+-    /* Remove from defines list (or set value=NULL if cmdvalue exists) */
++    /* Remove from defines list completely, regardless of cmdvalue */
+     for (dptr = defines; dptr != NULL; dptr_prev = dptr, dptr = dptr->next)
+     {
+         if (strcmp(name, dptr->name) == 0)
+         {
+-            free(dptr->value);
+-            dptr->value = NULL;
+-            if (dptr->cmdvalue == NULL)
+-            {
+-                if (dptr_prev == NULL)
+-                    defines = dptr->next;
+-                else
+-                    dptr_prev->next = dptr->next;
+-                free(dptr->name);
+-                free(dptr->value);
+-                free(dptr->cmdvalue);
+-                free(dptr);
+-            }
++            if (dptr_prev == NULL)
++                defines = dptr->next;
++            else
++                dptr_prev->next = dptr->next;
++            free(dptr->name);
++            free(dptr->value);
++            free(dptr->cmdvalue);
++            free(dptr);
+             break;
+         }
+     }
+ }
+```
+
+同时 `is_macro_defined` 简化，统一检查 `value != NULL`（因为 `#undef` 后节点已删除，不存在于列表中）：
+
+```diff
+ static bool
+ is_macro_defined(const char *name)
+ {
+     struct _defines *defptr;
+     struct _cpp_defines *cppptr;
+     
+     /* Check ECPG defines list first */
+     for (defptr = defines; defptr; defptr = defptr->next) {
+         if (strcmp(name, defptr->name) == 0 && defptr->value != NULL)
+             return true;
+     }
+     
+     /* Fallback to cpp_defines */
+     for (cppptr = cpp_defines; cppptr; cppptr = cppptr->next) {
+         if (strcmp(name, cppptr->name) == 0)
+             return true;
+     }
+     
+     return false;
+ }
+```
+
+## 修正后的完整验证
+
+| 场景 | 预期 | 修复后行为 |
+|------|------|-----------|
+| `#define XX1` → `#undef XX1` → `#ifdef XX1` | 选 `else` 分支 | `process_cpp_undef` 彻底删除，`is_macro_defined` 返回 false ✓ |
+| `#ifdef A1` (未定义) → `#define XX1` → `#endif` → `#ifdef XX1` | 选 `else` 分支 | `xskip` 状态下不处理 `#define`，`is_macro_defined` 返回 false ✓ |
+| `ecpg -DXX1` → `#undef XX1` → `#ifdef XX1` | 选 `else` 分支 | `process_cpp_undef` 彻底删除（含 cmdvalue），`is_macro_defined` 返回 false ✓ |
+
+---
+
+## 完整修正 Patch（仅变更部分）
+
+```diff
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -2506,30 +2506,21 @@ process_cpp_define(const char *name, const char *value, bool active)
+ static void
+ process_cpp_undef(const char *name)
+ {
+     struct _cpp_defines *cptr, *cptr_prev = NULL;
+     struct _defines *dptr, *dptr_prev = NULL;
+ 
+     /* Remove from cpp_defines list */
+     for (cptr = cpp_defines; cptr != NULL; cptr_prev = cptr, cptr = cptr->next)
+     {
+         if (strcmp(name, cptr->name) == 0)
+         {
+             if (cptr_prev == NULL)
+                 cpp_defines = cptr->next;
+             else
+                 cptr_prev->next = cptr->next;
+             free(cptr->name);
+             free(cptr);
+             break;
+         }
+     }
+ 
+-    /* Remove from defines list (or set value=NULL if cmdvalue exists) */
++    /* Remove from defines list completely, matching C preprocessor semantics */
+     for (dptr = defines; dptr != NULL; dptr_prev = dptr, dptr = dptr->next)
+     {
+         if (strcmp(name, dptr->name) == 0)
+         {
+-            free(dptr->value);
+-            dptr->value = NULL;
+-            if (dptr->cmdvalue == NULL)
+-            {
+-                if (dptr_prev == NULL)
+-                    defines = dptr->next;
+-                else
+-                    dptr_prev->next = dptr->next;
+-                free(dptr->name);
+-                free(dptr->value);
+-                free(dptr->cmdvalue);
+-                free(dptr);
+-            }
++            if (dptr_prev == NULL)
++                defines = dptr->next;
++            else
++                dptr_prev->next = dptr->next;
++            free(dptr->name);
++            free(dptr->value);
++            free(dptr->cmdvalue);
++            free(dptr);
+             break;
+         }
+     }
+ }
+```
+
+`is_macro_defined` 保持原修复版本即可（检查 `value != NULL`），因为 `#undef` 后节点已不存在于 `defines` 列表中。
+
+
+
+# 那你根据上面两次修改， 给1个完整的修改的 patch
+
+好的，我根据前面两次讨论，给出完整的修改 patch。这个 patch 基于已合并 `ifdef_jiexi_choose_branch.patch` + `define_XX1_as_DXX1.patch` 后的代码。
+
+```diff
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -79,7 +79,9 @@ static void process_cpp_if(int cond_type, char **macro_name, int default_state);
+ static void process_cpp_else(int default_state);
+ static void process_cpp_endif(int default_state);
+ static void output_cppline(void);
+-static void process_cpp_define(const char *name, const char *value);
++static void process_cpp_define(const char *name, const char *value, bool active);
++static void process_cpp_undef(const char *name);
++static bool is_cpp_undef_line(const char *line, char **name);
+ 
+ char	   *token_start;
+ 
+@@ -1184,7 +1186,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						process_cpp_endif(C);
+ 					}
+ 					else if (is_cpp_define_line(yytext, &def_name, &def_value)) {
+-						process_cpp_define(def_name, def_value);
++						process_cpp_define(def_name, def_value, true);
+ 						free(def_name);
+ 						free(def_value);
+ 						output_cppline();
+@@ -1360,7 +1362,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						process_cpp_endif(C);
+ 					}
+ 					else if (is_cpp_define_line(yytext, &def_name, &def_value)) {
+-						process_cpp_define(def_name, def_value);
++						process_cpp_define(def_name, def_value, true);
+ 						free(def_name);
+ 						free(def_value);
+ 						output_cppline();
+@@ -1377,7 +1379,18 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						process_cpp_endif(C);
+ 					}
+ 					else if (is_cpp_define_line(yytext, &def_name, &def_value)) {
+-						process_cpp_define(def_name, def_value);
++						/* Only process #define in active branch */
++						bool active = (preproc_tos <= 0) ||
++						              stacked_if_value[preproc_tos].active;
++						process_cpp_define(def_name, def_value, active);
++						free(def_name);
++						free(def_value);
++						output_cppline();
++					}
++					else if (is_cpp_undef_line(yytext, &def_name)) {
++						/* Only process #undef in active branch */
++						bool active = (preproc_tos <= 0) ||
++						              stacked_if_value[preproc_tos].active;
++						if (active)
++							process_cpp_undef(def_name);
+ 						free(def_name);
+-						free(def_value);
+ 						output_cppline();
+ 					}
+ 					else {
+@@ -1395,7 +1408,18 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
+ 						process_cpp_endif(C);
+ 					}
+ 					else if (is_cpp_define_line(yytext, &def_name, &def_value)) {
+-						process_cpp_define(def_name, def_value);
++						/* Only process #define in active branch */
++						bool active = (preproc_tos <= 0) ||
++						              stacked_if_value[preproc_tos].active;
++						process_cpp_define(def_name, def_value, active);
++						free(def_name);
++						free(def_value);
++						output_cppline();
++					}
++					else if (is_cpp_undef_line(yytext, &def_name)) {
++						/* Only process #undef in active branch */
++						bool active = (preproc_tos <= 0) ||
++						              stacked_if_value[preproc_tos].active;
++						if (active)
++							process_cpp_undef(def_name);
+ 						free(def_name);
+-						free(def_value);
+ 						output_cppline();
+ 					}
+ 					else {
+@@ -2434,7 +2458,7 @@ is_cpp_define_line(const char *line, char **name, char **value)
+ }
+ 
+ static void
+-process_cpp_define(const char *name, const char *value)
++process_cpp_define(const char *name, const char *value, bool active)
+ {
+     struct _cpp_defines *cptr;
+     struct _defines *dptr;
+@@ -2458,6 +2482,9 @@ process_cpp_define(const char *name, const char *value)
+      * Also add/update the ECPG defines list, so that #define in a .pc or
+      * header file behaves equivalently to ecpg -Dname[=value].  A #define
+      * without a value is treated as -Dname (i.e. value "1").
++     *
++     * Note: We add to 'defines' so that is_macro_defined() checks it first,
++     * and #undef (process_cpp_undef) can properly cancel this #define.
+      */
+     edef_value = (value && value[0] != '\0') ? value : "1";
+ 
+@@ -2479,6 +2506,62 @@ process_cpp_define(const char *name, const char *value)
+     dptr->next = defines;
+     defines = dptr;
+ }
++
++static void
++process_cpp_undef(const char *name)
++{
++    struct _cpp_defines *cptr, *cptr_prev = NULL;
++    struct _defines *dptr, *dptr_prev = NULL;
++
++    /* Remove from cpp_defines list */
++    for (cptr = cpp_defines; cptr != NULL; cptr_prev = cptr, cptr = cptr->next)
++    {
++        if (strcmp(name, cptr->name) == 0)
++        {
++            if (cptr_prev == NULL)
++                cpp_defines = cptr->next;
++            else
++                cptr_prev->next = cptr->next;
++            free(cptr->name);
++            free(cptr);
++            break;
++        }
++    }
++
++    /* Remove from defines list completely, matching C preprocessor semantics */
++    for (dptr = defines; dptr != NULL; dptr_prev = dptr, dptr = dptr->next)
++    {
++        if (strcmp(name, dptr->name) == 0)
++        {
++            if (dptr_prev == NULL)
++                defines = dptr->next;
++            else
++                dptr_prev->next = dptr->next;
++            free(dptr->name);
++            free(dptr->value);
++            free(dptr->cmdvalue);
++            free(dptr);
++            break;
++        }
++    }
++}
++
++static bool
++is_cpp_undef_line(const char *line, char **name)
++{
++    const char *p = line;
++    const char *start;
++    int len;
++
++    while (*p && ecpg_isspace(*p))
++        p++;
++
++    if (*p != '#')
++        return false;
++    p++;
++
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++
++    if (strncmp(p, "undef", 5) != 0 ||
++        (isalnum((unsigned char)p[5]) || p[5] == '_'))
++        return false;
++    p += 5;
++
++    while (*p && (*p == ' ' || *p == '\t'))
++        p++;
++
++    start = p;
++    if (!(isalpha((unsigned char)*p) || *p == '_'))
++        return false;
++    p++;
++    while (*p && (isalnum((unsigned char)*p) || *p == '_'))
++        p++;
++
++    len = p - start;
++    *name = (char *) mm_alloc(len + 1);
++    strncpy(*name, start, len);
++    (*name)[len] = '\0';
++
++    return true;
++}
+```
+
+另外需要修改 `is_macro_defined`，让 `defines` 列表优先，且统一检查 `value != NULL`：
+
+```diff
+ static bool
+ is_macro_defined(const char *name)
+ {
+-    struct _cpp_defines *cppptr;
+     struct _defines *defptr;
++    struct _cpp_defines *cppptr;
+     
+-    for (cppptr = cpp_defines; cppptr; cppptr = cppptr->next) {
+-        if (strcmp(name, cppptr->name) == 0)
+-            return true;
+-    }
+-    
++    /* Check ECPG defines list first: it reflects #undef correctly */
+     for (defptr = defines; defptr; defptr = defptr->next) {
+         if (strcmp(name, defptr->name) == 0 && defptr->value != NULL)
+             return true;
+     }
++    
++    /* Fallback to cpp_defines for macros not in defines list */
++    for (cppptr = cpp_defines; cppptr; cppptr = cppptr->next) {
++        if (strcmp(name, cppptr->name) == 0)
++            return true;
++    }
++    
+     return false;
+ }
+```
+
+---
+
+## 关键修改点总结
+
+| 修改 | 说明 |
+|------|------|
+| `process_cpp_define` 加 `active` 参数 | 不活跃分支内的 `#define` 不生效 |
+| 新增 `process_cpp_undef` 函数 | 彻底删除 `cpp_defines` 和 `defines` 中的宏，符合 C 语义 |
+| 新增 `is_cpp_undef_line` 函数 | 识别 `#undef NAME` 指令 |
+| `cppline` 规则加 `#undef` 分支 | 在 `<C,SQL>` 和 `<xskip>` 状态都处理 `#undef` |
+| `is_macro_defined` 优先查 `defines` | `#undef` 后节点已删除，正确返回 false |
+| `xskip` 状态下 `#define/#undef` 加 `active` 判断 | 不活跃分支内的预处理指令只输出不生效 |
+
+
+
+
+
