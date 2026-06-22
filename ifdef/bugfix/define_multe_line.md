@@ -288,3 +288,114 @@ else if (is_cpp_define_line(yytext, &def_name)) {
 
 `cppline` 规则匹配整行（含续行），`is_cpp_define_line` 提取到 `CHECK_EXEC_STATUS` 就返回，后续 `\` 和宏体全部忽略。`process_cpp_define` 只记录宏名到 `cpp_defines`。完美处理。
 
+
+# 补充函数定义
+
+前面 `process_cpp_define` 的修改内容在之前的回复中已经给出，但确实分散了。下面是完整的、可直接使用的 `process_cpp_define` 修改：
+
+```c
+static void
+process_cpp_define(const char *name, bool active)
+{
+    struct _cpp_defines *cptr;
+
+    if (!active)
+        return;
+
+    /*
+     * Oracle Pro*C semantics: #define in .pc files is ONLY used for
+     * conditional compilation (#ifdef/#ifndef). It does NOT participate
+     * in macro expansion (isdefine() only checks the 'defines' list,
+     * which is populated by ecpg -D and EXEC SQL DEFINE).
+     *
+     * Multi-line definitions like "#define XX \" are also handled here:
+     * we only care about the macro name, the value is irrelevant.
+     */
+    for (cptr = cpp_defines; cptr != NULL; cptr = cptr->next)
+    {
+        if (strcmp(name, cptr->name) == 0)
+            return;  /* already defined */
+    }
+
+    cptr = (struct _cpp_defines *) mm_alloc(sizeof(struct _cpp_defines));
+    cptr->name = mm_strdup(name);
+    cptr->next = cpp_defines;
+    cpp_defines = cptr;
+}
+```
+
+核心变更：
+- 去掉 `value` 参数
+- 只操作 `cpp_defines` 列表，**不操作 `defines` 列表**
+- `#define` 仅用于 `#ifdef`/`#ifndef` 判断，不参与 `isdefine()` 宏替换
+
+对应的 `process_cpp_undef`：
+
+```c
+static void
+process_cpp_undef(const char *name)
+{
+    struct _cpp_defines *cptr, *cptr_prev = NULL;
+
+    /* Only remove from cpp_defines, not from defines (ecpg -D / EXEC SQL DEFINE) */
+    for (cptr = cpp_defines; cptr != NULL; cptr_prev = cptr, cptr = cptr->next)
+    {
+        if (strcmp(name, cptr->name) == 0)
+        {
+            if (cptr_prev == NULL)
+                cpp_defines = cptr->next;
+            else
+                cptr_prev->next = cptr->next;
+            free(cptr->name);
+            free(cptr);
+            break;
+        }
+    }
+}
+```
+
+以及 `is_cpp_undef_line`：
+
+```c
+static bool
+is_cpp_undef_line(const char *line, char **name)
+{
+    const char *p = line;
+    const char *start;
+    int len;
+
+    while (*p && ecpg_isspace(*p))
+        p++;
+
+    if (*p != '#')
+        return false;
+    p++;
+
+    while (*p && (*p == ' ' || *p == '\t'))
+        p++;
+
+    if (strncmp(p, "undef", 5) != 0 ||
+        (isalnum((unsigned char)p[5]) || p[5] == '_'))
+        return false;
+    p += 5;
+
+    while (*p && (*p == ' ' || *p == '\t'))
+        p++;
+
+    start = p;
+    if (!(isalpha((unsigned char)*p) || *p == '_'))
+        return false;
+    p++;
+    while (*p && (isalnum((unsigned char)*p) || *p == '_'))
+        p++;
+
+    len = p - start;
+    *name = (char *) mm_alloc(len + 1);
+    strncpy(*name, start, len);
+    (*name)[len] = '\0';
+
+    return true;
+}
+```
+
+`is_macro_defined` 保持先查 `defines` 再查 `cpp_defines` 不变。
