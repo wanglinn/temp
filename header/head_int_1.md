@@ -1837,3 +1837,471 @@ EXEC SQL END DECLARE SECTION;
 ```
 
 函数体内的 `int x1;` / `int x2;` 因 `brace_level=1` 不提取。请验证。
+
+
+# 上面改的方案 我觉的有问题。 比如pc 文件中写的 #include "xx1.h" 现在提取信息到 xx1.h.extract , 如果有 #include "xx2.h" 也完全复制过来。现在使用parse_include 处理 xx1.h.extract ， 读取到 #include  “xx2.h”文件内容, 则打开这个xx2.h 文件内容 进行提取， 然后使用 parse_include 处理 xx2.h.extract 。
+
+你看是不是应该这样处理
+
+
+确认了，方案 B：
+
+- `xx1.h.extract` 包含 `BEGIN/END`，其中 `#include "xx2.h"` 原样保留
+- ECPG 处理到 `#include "xx2.h"` 时，`parse_include()` 打开 `xx2.h`
+- 生成 `xx2.h.extract`（**不包含** `BEGIN/END`）
+- 打开 `xx2.h.extract`
+
+实现方式：`extract_host_vars()` 增加参数 `add_wrapper`，顶层调用为 `true`，嵌套调用为 `false`。
+
+但 `parse_include()` 如何区分顶层和嵌套？
+
+**方案**：`parse_include()` 中，根据当前打开的文件名判断：
+- 如果当前文件名以 `.extract` 结尾 → 说明已经在处理 `.extract` 文件，是嵌套调用 → `add_wrapper = false`
+- 否则 → 是顶层调用 → `add_wrapper = true`
+
+不对，`parse_include()` 被调用时，当前文件还没打开，是准备打开新文件。
+
+**正确方案**：`parse_include()` 中，生成 `.extract` 文件时，根据**被包含文件的原文件名**判断：
+- 如果原文件是 `.pc` 文件直接包含的（即 `yytext` 中的文件名不以 `.extract` 结尾）→ 顶层 → `add_wrapper = true`
+- 如果原文件是 `.extract` 文件中的 `#include`（即 `yytext` 中的文件名不以 `.extract` 结尾，但当前 `input_filename` 以 `.extract` 结尾）→ 嵌套 → `add_wrapper = false`
+
+实际上更简单：`parse_include()` 中，检查当前 `input_filename`：
+- `input_filename` 以 `.extract` 结尾 → 已经在 `.extract` 中 → 嵌套 → `add_wrapper = false`
+- `input_filename` 是 `.pc` 文件 → 顶层 → `add_wrapper = true`
+
+但 `input_filename` 在 `parse_include()` 被调用时，还是当前文件（`.pc` 或 `.extract`）。
+
+**最终实现**：
+
+```c
+/* parse_include() 中 */
+bool add_wrapper = true;
+if (input_filename != NULL)
+{
+    size_t len = strlen(input_filename);
+    if (len > 8 && strcmp(input_filename + len - 8, ".extract") == 0)
+        add_wrapper = false;  /* 已经在 .extract 文件中，嵌套包含 */
+}
+```
+
+下面是完整 patch：
+
+```diff
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -79,6 +79,9 @@ static void parse_include(void);
+ static bool ecpg_isspace(char ch);
+ static bool isdefine(void);
+ static bool isinformixdefine(void);
++static bool extract_host_vars(const char *srcfile, const char *dstfile, bool add_wrapper);
++static bool is_int_var_line(const char *line, bool *is_include);
++static int debug_log = 0;  /* 对应 ecpg -D 调试模式，=1 时不删除临时文件 */
+ 
+ char	   *token_start;
+ 
+@@ -2360,6 +2363,8 @@ parse_include(void)
+ 	struct _yy_buffer *yb;
+ 	struct _include_path *ip;
+ 	char		inc_file[MAXPGPATH];
++	char		extract_file[MAXPGPATH];
++	bool		use_extract = false;
+ 	unsigned int i;
+ 
+ 	yb = mm_alloc(sizeof(struct _yy_buffer));
+@@ -2403,6 +2408,20 @@ parse_include(void)
+ 		memmove(yytext, yytext + 1, strlen(yytext));
+ 
+ 		strlcpy(inc_file, yytext, sizeof(inc_file));
++
++		/* 对双引号包含的头文件尝试提取宿主变量 */
++		snprintf(extract_file, sizeof(extract_file), "%s.extract", inc_file);
++		{
++			bool add_wrapper = true;
++			if (input_filename != NULL)
++			{
++				size_t len = strlen(input_filename);
++				if (len > 8 && strcmp(input_filename + len - 8, ".extract") == 0)
++					add_wrapper = false;  /* 嵌套包含，不加 BEGIN/END */
++			}
++			if (extract_host_vars(inc_file, extract_file, add_wrapper))
++				use_extract = true;
++		}
++
+ 		yyin = fopen(inc_file, "r");
+ 		if (!yyin)
+ 		{
+@@ -2453,6 +2472,21 @@ parse_include(void)
+ 	if (!yyin)
+ 		mmfatal(NO_INCLUDE_FILE, "could not open include file \"%s\" on line %d", yytext, yylineno);
+ 
++	/* 如果提取成功，切换到临时文件 */
++	if (use_extract)
++	{
++		fclose(yyin);
++		yyin = fopen(extract_file, "r");
++		if (!yyin)
++			mmfatal(NO_INCLUDE_FILE, "could not open extract file \"%s\" on line %d", extract_file, yylineno);
++		input_filename = mm_strdup(extract_file);
++	}
++	else
++	{
++		input_filename = mm_strdup(inc_file);
++	}
++
+-	input_filename = mm_strdup(inc_file);
+ 	yy_switch_to_buffer(yy_create_buffer(yyin, YY_BUF_SIZE));
+ 	yylineno = 1;
+ 	output_line_number();
+@@ -2471,6 +2505,224 @@ parse_include(void)
+ 	BEGIN(C);
+ }
+ 
++/*
++ * is_int_var_line --- 判断一行是否为 int 类型变量定义（含数组）
++ *
++ * 支持: int, unsigned int, signed int 全局变量定义（含数组形式）
++ * 过滤: extern, 函数声明(含'('), 预处理指令(除#include外), 注释
++ *
++ * 返回: true 表示需要提取，false 表示跳过
++ */
++static bool
++is_int_var_line(const char *line, bool *is_include)
++{
++	const char *p = line;
++	bool is_extern = false;
++	bool is_int = false;
++	bool has_paren = false;
++
++	*is_include = false;
++
++	/* 跳过行首空白 */
++	while (*p && (*p == ' ' || *p == '\t'))
++		p++;
++
++	/* 空行 */
++	if (*p == '\n' || *p == '\r' || *p == '\0')
++		return false;
++
++	/* 预处理指令 */
++	if (*p == '#')
++	{
++		const char *q = p + 1;
++		while (*q && (*q == ' ' || *q == '\t'))
++			q++;
++
++		/* 检查是否为 #include "..." */
++		if ((q[0] == 'i' || q[0] == 'I') &&
++			(q[1] == 'n' || q[1] == 'N') &&
++			(q[2] == 'c' || q[2] == 'C') &&
++			(q[3] == 'l' || q[3] == 'L') &&
++			(q[4] == 'u' || q[4] == 'U') &&
++			(q[5] == 'd' || q[5] == 'D') &&
++			(q[6] == 'e' || q[6] == 'E') &&
++			(q[7] == ' ' || q[7] == '\t'))
++		{
++			q += 8;
++			while (*q && (*q == ' ' || *q == '\t'))
++				q++;
++			if (*q == '"')
++			{
++				*is_include = true;
++				return true;
++			}
++		}
++		return false;
++	}
++
++	/* 跳过 // 注释 */
++	if (p[0] == '/' && p[1] == '/')
++		return false;
++
++	/* 跳过 /* 块注释开始 */
++	if (p[0] == '/' && p[1] == '*')
++		return false;
++
++	/* 检查 extern */
++	if ((p[0] == 'e' || p[0] == 'E') &&
++		(p[1] == 'x' || p[1] == 'X') &&
++		(p[2] == 't' || p[2] == 'T') &&
++		(p[3] == 'e' || p[3] == 'E') &&
++		(p[4] == 'r' || p[4] == 'R') &&
++		(p[5] == 'n' || p[5] == 'N') &&
++		(p[6] == ' ' || p[6] == '\t'))
++	{
++		is_extern = true;
++	}
++
++	/* 检查 unsigned / signed */
++	if (!is_extern)
++	{
++		if ((p[0] == 'u' || p[0] == 'U') &&
++			(p[1] == 'n' || p[1] == 'N') &&
++			(p[2] == 's' || p[2] == 'S') &&
++			(p[3] == 'i' || p[3] == 'I') &&
++			(p[4] == 'g' || p[4] == 'G') &&
++			(p[5] == 'n' || p[5] == 'N') &&
++			(p[6] == 'e' || p[6] == 'E') &&
++			(p[7] == 'd' || p[7] == 'D') &&
++			(p[8] == ' ' || p[8] == '\t'))
++		{
++			p += 9;
++			while (*p && (*p == ' ' || *p == '\t'))
++				p++;
++		}
++		else if ((p[0] == 's' || p[0] == 'S') &&
++				 (p[1] == 'i' || p[1] == 'I') &&
++				 (p[2] == 'g' || p[2] == 'G') &&
++				 (p[3] == 'n' || p[3] == 'N') &&
++				 (p[4] == 'e' || p[4] == 'E') &&
++				 (p[5] == 'd' || p[5] == 'D') &&
++				 (p[6] == ' ' || p[6] == '\t'))
++		{
++			p += 7;
++			while (*p && (*p == ' ' || *p == '\t'))
++				p++;
++		}
++	}
++
++	/* 检查 int */
++	if (!is_extern)
++	{
++		if ((p[0] == 'i' || p[0] == 'I') &&
++			(p[1] == 'n' || p[1] == 'N') &&
++			(p[2] == 't' || p[2] == 'T') &&
++			(p[3] == ' ' || p[3] == '\t' || p[3] == '\n' || p[3] == '\r' ||
++			 p[3] == ';' || p[3] == '\0'))
++		{
++			is_int = true;
++		}
++	}
++
++	/* 检查是否包含 '(' —— 函数声明的特征 */
++	if (is_int && !is_extern)
++	{
++		const char *q = p + 3;
++		while (*q && *q != '\n' && *q != '\r')
++		{
++			if (*q == '(')
++			{
++				has_paren = true;
++				break;
++			}
++			q++;
++		}
++	}
++
++	return (is_int && !is_extern && !has_paren);
++}
++
++/*
++ * extract_host_vars --- 提取 int 类型宿主变量定义到临时文件
++ *
++ * add_wrapper: true 添加 BEGIN/END DECLARE SECTION，false 不添加
++ * 行号对齐：不提取的行用空行占位
++ * 缩进对齐：提取的行原样输出
++ */
++static bool
++extract_host_vars(const char *srcfile, const char *dstfile, bool add_wrapper)
++{
++	FILE *src, *dst;
++	char line[4096];
++	bool has_content = false;
++	int brace_level = 0;
++
++	src = fopen(srcfile, "r");
++	if (!src)
++		return false;
++
++	dst = fopen(dstfile, "w");
++	if (!dst)
++	{
++		fclose(src);
++		return false;
++	}
++
++	if (add_wrapper)
++		fprintf(dst, "EXEC SQL BEGIN DECLARE SECTION;\n");
++
++	while (fgets(line, sizeof(line), src))
++	{
++		char *p;
++		bool is_include = false;
++		bool extract_line = false;
++
++		/* 更新大括号层级 */
++		for (p = line; *p; p++)
++		{
++			if (*p == '{')
++				brace_level++;
++			else if (*p == '}')
++				brace_level--;
++		}
++
++		if (brace_level == 0)
++			extract_line = is_int_var_line(line, &is_include);
++
++		if (extract_line)
++		{
++			/* #include 或 int 变量定义，原样输出 */
++			fprintf(dst, "%s", line);
++			has_content = true;
++		}
++		else
++		{
++			fprintf(dst, "\n");
++		}
++	}
++
++	if (add_wrapper)
++		fprintf(dst, "EXEC SQL END DECLARE SECTION;\n");
++
++	fclose(src);
++	fclose(dst);
++
++	if (!has_content)
++	{
++		remove(dstfile);
++		return false;
++	}
++
++	return true;
++}
++
++/*
++ * cleanup_extract_file --- 清理临时 .extract 文件
++ */
++static void
++cleanup_extract_file(void)
++{
++	if (debug_log)
++		return;
++
++	if (input_filename != NULL)
++	{
++		size_t len = strlen(input_filename);
++		if (len > 8 && strcmp(input_filename + len - 8, ".extract") == 0)
++		{
++			remove(input_filename);
++		}
++	}
++}
++
+ /*
+  * ecpg_isspace() --- return true if flex scanner considers char whitespace
+  */
+@@ -2498,6 +2750,9 @@ isdefine(void)
+ 			ptr->value != NULL &&
+ 			ptr->used == NULL)
+ 		{
++			/* 清理可能存在的临时文件 */
++			cleanup_extract_file();
++
+ 			/* Save state associated with the current buffer */
+ 			struct _yy_buffer *yb;
+ 
+@@ -2548,6 +2803,9 @@ isinformixdefine(void)
+ 	if (new)
+ 	{
++		/* 清理可能存在的临时文件 */
++		cleanup_extract_file();
++
+ 		/* Save state associated with the current buffer */
+ 		struct _yy_buffer *yb;
+ 
+@@ -2576,6 +2834,9 @@ isinformixdefine(void)
+ 					{
+ 						if (yy_buffer == NULL)
+ 						{
++							/* 退出主文件前清理临时文件 */
++							cleanup_extract_file();
++
+ 							/* No more input */
+ 							if (preproc_tos > 0)
+ 							{
+@@ -2586,6 +2846,9 @@ isinformixdefine(void)
+ 						}
+ 						else
+ 						{
++							/* 切换文件前清理临时文件 */
++							cleanup_extract_file();
++
+ 							/* Revert to previous input source */
+ 							struct _yy_buffer *yb = yy_buffer;
+ 							int			i;
+```
+
+### 关键逻辑
+
+1. **`parse_include()` 中判断嵌套**：
+   ```c
+   bool add_wrapper = true;
+   if (input_filename != NULL)
+   {
+       size_t len = strlen(input_filename);
+       if (len > 8 && strcmp(input_filename + len - 8, ".extract") == 0)
+           add_wrapper = false;  /* 已经在 .extract 中，嵌套 */
+   }
+   ```
+
+2. **`extract_host_vars()` 参数**：
+   - `add_wrapper = true`：`xx1.h.extract` 包含 `BEGIN/END`
+   - `add_wrapper = false`：`xx2.h.extract` 不包含 `BEGIN/END`
+
+3. **`#include` 处理**：
+   - `xx1.h.extract` 中保留原样 `#include "xx2.h"`
+   - ECPG 处理时，`parse_include()` 打开 `xx2.h`，生成 `xx2.h.extract`（无 `BEGIN/END`），然后打开 `xx2.h.extract`
+
+### 生成文件示例
+
+**h1.h**：
+```c
+#ifndef H1_H
+#define H1_H
+
+#include "h2.h"
+
+int global_a;
+
+#endif
+```
+
+**h1.h.extract**：
+```c
+EXEC SQL BEGIN DECLARE SECTION;
+                              /* 第1行 */
+                              /* 第2行 */
+#include "h2.h"               /* 第3行：原样保留 */
+int global_a;                 /* 第4行 */
+                              /* 第5行 */
+EXEC SQL END DECLARE SECTION;
+```
+
+**h2.h**：
+```c
+#ifndef H2_H
+#define H2_H
+
+int global_b;
+
+#endif
+```
+
+**h2.h.extract**：
+```c
+                              /* 第1行 */
+                              /* 第2行 */
+int global_b;                 /* 第3行：无 BEGIN/END */
+                              /* 第4行 */
+```
+
+ECPG 处理 `h1.h.extract` 时：
+1. `BEGIN DECLARE SECTION` → 进入 SQL 状态
+2. `#include "h2.h"` → `parse_include()` 打开 `h2.h`
+3. 生成 `h2.h.extract`（`add_wrapper = false`，因为 `input_filename` 是 `h1.h.extract`）
+4. 打开 `h2.h.extract`，`int global_b;` 在 `BEGIN/END` 上下文中被识别
+5. 回到 `h1.h.extract`，`int global_a;` 被识别
+6. `END DECLARE SECTION`
+
+无嵌套问题。请验证。
+
+
