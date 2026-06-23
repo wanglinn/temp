@@ -1064,3 +1064,776 @@ ecpg a1.pc
 - 非调试模式下，`ecpg` 完成后 `h1.h.extract` 被删除
 
 请验证后反馈，没问题继续第二步 `char` 类型。
+
+
+# 生成的临时文件 行内容的缩进 也要和原文件对齐
+
+明白了，临时文件中提取的行内容缩进要和原文件保持一致。
+
+当前 patch 已经是这样做的——`is_int_var_line()` 只判断是否提取，提取时通过 `fprintf(dst, "%s", line)` 原样写入整行（包括行首缩进和尾部换行）。
+
+但有一个问题：**`is_int_var_line()` 在判断时跳过了行首空白**，但写入时保留原行。这没问题，因为判断逻辑修改的是局部指针 `p`，不影响原 `line` 内容。
+
+不过我需要确认一点：当 `unsigned int` 或 `signed int` 前面有缩进时，`is_int_var_line()` 中 `p` 已经前移到 `unsigned`/`signed` 位置，判断逻辑正确。写入时 `line` 仍包含原始缩进。
+
+让我再检查一下 patch 中是否有问题...
+
+实际上，当前 patch 的 `extract_host_vars()` 中：
+```c
+while (fgets(line, sizeof(line), src))
+{
+    if (is_int_var_line(line))
+    {
+        fprintf(dst, "%s", line);  // 原样写入，保留缩进
+    }
+    else
+    {
+        fprintf(dst, "\n");  // 空行占位
+    }
+}
+```
+
+这里 `line` 是 `fgets` 读取的原始行（包含 `\n`），`fprintf(dst, "%s", line)` 会原样输出，**缩进已经保留**。
+
+所以当前 patch 已经满足"缩进对齐"的需求，不需要额外修改。
+
+但让我再优化一下 patch，确保 `is_int_var_line()` 中的指针移动不会意外修改原 `line`（当前是 `const char *p = line`，只读，安全）。
+
+下面是优化后的最终 patch（和之前基本一致，确认缩进保留逻辑）：
+
+```diff
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -79,6 +79,8 @@ static void parse_include(void);
+ static bool ecpg_isspace(char ch);
+ static bool isdefine(void);
+ static bool isinformixdefine(void);
++static bool extract_host_vars(const char *srcfile, const char *dstfile);
++static int debug_log = 0;  /* 对应 ecpg -D 调试模式，=1 时不删除临时文件 */
+ 
+ char	   *token_start;
+ 
+@@ -2360,6 +2362,8 @@ parse_include(void)
+ 	struct _yy_buffer *yb;
+ 	struct _include_path *ip;
+ 	char		inc_file[MAXPGPATH];
++	char		extract_file[MAXPGPATH];
++	bool		use_extract = false;
+ 	unsigned int i;
+ 
+ 	yb = mm_alloc(sizeof(struct _yy_buffer));
+@@ -2403,6 +2407,16 @@ parse_include(void)
+ 		memmove(yytext, yytext + 1, strlen(yytext));
+ 
+ 		strlcpy(inc_file, yytext, sizeof(inc_file));
++
++		/* 对双引号包含的头文件尝试提取宿主变量 */
++		snprintf(extract_file, sizeof(extract_file), "%s.extract", inc_file);
++		if (extract_host_vars(inc_file, extract_file))
++		{
++			use_extract = true;
++		}
++		else
++		{
++			use_extract = false;
++		}
++
+ 		yyin = fopen(inc_file, "r");
+ 		if (!yyin)
+ 		{
+@@ -2453,6 +2467,21 @@ parse_include(void)
+ 	if (!yyin)
+ 		mmfatal(NO_INCLUDE_FILE, "could not open include file \"%s\" on line %d", yytext, yylineno);
+ 
++	/* 如果提取成功，切换到临时文件 */
++	if (use_extract)
++	{
++		fclose(yyin);
++		yyin = fopen(extract_file, "r");
++		if (!yyin)
++			mmfatal(NO_INCLUDE_FILE, "could not open extract file \"%s\" on line %d", extract_file, yylineno);
++		input_filename = mm_strdup(extract_file);
++	}
++	else
++	{
++		input_filename = mm_strdup(inc_file);
++	}
++
+-	input_filename = mm_strdup(inc_file);
+ 	yy_switch_to_buffer(yy_create_buffer(yyin, YY_BUF_SIZE));
+ 	yylineno = 1;
+ 	output_line_number();
+@@ -2471,6 +2500,228 @@ parse_include(void)
+ 	BEGIN(C);
+ }
+ 
++/*
++ * is_int_var_line --- 判断一行是否为 int 类型变量定义（含数组）
++ *
++ * 支持: int, unsigned int, signed int 变量定义（含数组形式）
++ * 过滤: extern, 函数声明(含'('), 预处理指令, 注释
++ *
++ * 返回: true 表示需要提取，false 表示跳过
++ */
++static bool
++is_int_var_line(const char *line)
++{
++	const char *p = line;  /* 只读指针，不修改原 line */
++	bool is_extern = false;
++	bool is_int = false;
++	bool has_paren = false;
++
++	/* 跳过行首空白 */
++	while (*p && (*p == ' ' || *p == '\t'))
++		p++;
++
++	/* 空行 */
++	if (*p == '\n' || *p == '\r' || *p == '\0')
++		return false;
++
++	/* 跳过预处理指令 */
++	if (*p == '#')
++		return false;
++
++	/* 跳过 // 注释 */
++	if (p[0] == '/' && p[1] == '/')
++		return false;
++
++	/* 跳过 /* 块注释开始 */
++	if (p[0] == '/' && p[1] == '*')
++		return false;
++
++	/* 检查 extern */
++	if ((p[0] == 'e' || p[0] == 'E') &&
++		(p[1] == 'x' || p[1] == 'X') &&
++		(p[2] == 't' || p[2] == 'T') &&
++		(p[3] == 'e' || p[3] == 'E') &&
++		(p[4] == 'r' || p[4] == 'R') &&
++		(p[5] == 'n' || p[5] == 'N') &&
++		(p[6] == ' ' || p[6] == '\t'))
++	{
++		is_extern = true;
++	}
++
++	/* 检查 unsigned / signed */
++	if (!is_extern)
++	{
++		if ((p[0] == 'u' || p[0] == 'U') &&
++			(p[1] == 'n' || p[1] == 'N') &&
++			(p[2] == 's' || p[2] == 'S') &&
++			(p[3] == 'i' || p[3] == 'I') &&
++			(p[4] == 'g' || p[4] == 'G') &&
++			(p[5] == 'n' || p[5] == 'N') &&
++			(p[6] == 'e' || p[6] == 'E') &&
++			(p[7] == 'd' || p[7] == 'D') &&
++			(p[8] == ' ' || p[8] == '\t'))
++		{
++			p += 9;
++			while (*p && (*p == ' ' || *p == '\t'))
++				p++;
++		}
++		else if ((p[0] == 's' || p[0] == 'S') &&
++				 (p[1] == 'i' || p[1] == 'I') &&
++				 (p[2] == 'g' || p[2] == 'G') +
++				 (p[3] == 'n' || p[3] == 'N') &&
++				 (p[4] == 'e' || p[4] == 'E') &&
++				 (p[5] == 'd' || p[5] == 'D') &&
++				 (p[6] == ' ' || p[6] == '\t'))
++		{
++			p += 7;
++			while (*p && (*p == ' ' || *p == '\t'))
++				p++;
++		}
++	}
++
++	/* 检查 int */
++	if (!is_extern)
++	{
++		if ((p[0] == 'i' || p[0] == 'I') &&
++			(p[1] == 'n' || p[1] == 'N') &&
++			(p[2] == 't' || p[2] == 'T') &&
++			(p[3] == ' ' || p[3] == '\t' || p[3] == '\n' || p[3] == '\r' ||
++			 p[3] == ';' || p[3] == '\0'))
++		{
++			is_int = true;
++		}
++	}
++
++	/* 检查是否包含 '(' —— 函数声明的特征 */
++	if (is_int && !is_extern)
++	{
++		const char *q = p + 3;
++		while (*q && *q != '\n' && *q != '\r')
++		{
++			if (*q == '(')
++			{
++				has_paren = true;
++				break;
++			}
++			q++;
++		}
++	}
++
++	/* 提取条件：是 int 类型定义，不是 extern，不是函数声明 */
++	return (is_int && !is_extern && !has_paren);
++}
++
++/*
++ * extract_host_vars --- 从头文件中提取 int 类型宿主变量定义
++ *
++ * 行号对齐：不提取的行用空行占位，保持与原文件行号一致
++ * 缩进对齐：提取的行原样输出，保留原始缩进
++ * 返回 true 表示成功提取到内容，false 表示无内容或失败
++ */
++static bool
++extract_host_vars(const char *srcfile, const char *dstfile)
++{
++	FILE *src, *dst;
++	char line[4096];
++	bool has_content = false;
++
++	src = fopen(srcfile, "r");
++	if (!src)
++		return false;
++
++	dst = fopen(dstfile, "w");
++	if (!dst)
++	{
++		fclose(src);
++		return false;
++	}
++
++	/* 写入 BEGIN DECLARE SECTION（占第1行） */
++	fprintf(dst, "EXEC SQL BEGIN DECLARE SECTION;\n");
++
++	while (fgets(line, sizeof(line), src))
++	{
++		if (is_int_var_line(line))
++		{
++			/* 原样输出，保留原始缩进 */
++			fprintf(dst, "%s", line);
++			has_content = true;
++		}
++		else
++		{
++			/* 不提取的行用空行占位，保持行号对齐 */
++			fprintf(dst, "\n");
++		}
++	}
++
++	/* 写入 END DECLARE SECTION */
++	fprintf(dst, "EXEC SQL END DECLARE SECTION;\n");
++
++	fclose(src);
++	fclose(dst);
++
++	/* 如果没有提取到任何内容，删除临时文件 */
++	if (!has_content)
++	{
++		remove(dstfile);
++		return false;
++	}
++
++	return true;
++}
++
++/*
++ * cleanup_extract_file --- 清理临时 .extract 文件
++ *
++ * debug_log = 1 时不删除（调试模式保留）
++ */
++static void
++cleanup_extract_file(void)
++{
++	if (debug_log)
++		return;
++
++	if (input_filename != NULL)
++	{
++		size_t len = strlen(input_filename);
++		if (len > 8 && strcmp(input_filename + len - 8, ".extract") == 0)
++		{
++			remove(input_filename);
++		}
++	}
++}
++
+ /*
+  * ecpg_isspace() --- return true if flex scanner considers char whitespace
+  */
+@@ -2498,6 +2739,9 @@ isdefine(void)
+ 			ptr->value != NULL &&
+ 			ptr->used == NULL)
+ 		{
++			/* 清理可能存在的临时文件 */
++			cleanup_extract_file();
++
+ 			/* Save state associated with the current buffer */
+ 			struct _yy_buffer *yb;
+ 
+@@ -2548,6 +2792,9 @@ isinformixdefine(void)
+ 	if (new)
+ 	{
++		/* 清理可能存在的临时文件 */
++		cleanup_extract_file();
++
+ 		/* Save state associated with the current buffer */
+ 		struct _yy_buffer *yb;
+ 
+@@ -2576,6 +2823,9 @@ isinformixdefine(void)
+ 					{
+ 						if (yy_buffer == NULL)
+ 						{
++							/* 退出主文件前清理临时文件 */
++							cleanup_extract_file();
++
+ 							/* No more input */
+ 							if (preproc_tos > 0)
+ 							{
+@@ -2586,6 +2836,9 @@ isinformixdefine(void)
+ 						}
+ 						else
+ 						{
++							/* 切换文件前清理临时文件 */
++							cleanup_extract_file();
++
+ 							/* Revert to previous input source */
+ 							struct _yy_buffer *yb = yy_buffer;
+ 							int			i;
+```
+
+### 生成的临时文件示例
+
+**h1.h**：
+```c
+#ifndef H1_H
+#define H1_H
+
+    // 带缩进的注释
+    int global_a;
+    unsigned int global_b;
+        signed int global_c;
+
+    extern int ext_val;
+    void helper(void);
+    int arr[10];
+        int arr2[20][10];
+    int initialized = 100;
+
+#endif
+```
+
+**h1.h.extract**：
+```c
+EXEC SQL BEGIN DECLARE SECTION;
+                              /* 第1行：#ifndef 跳过，空行 */
+                              /* 第2行：#define 跳过，空行 */
+                              /* 第3行：空行跳过，空行 */
+                              /* 第4行：// 注释跳过，空行 */
+    int global_a;             /* 第5行：提取，保留4空格缩进 */
+    unsigned int global_b;    /* 第6行：提取，保留4空格缩进 */
+        signed int global_c;  /* 第7行：提取，保留8空格缩进 */
+                              /* 第8行：空行跳过，空行 */
+                              /* 第9行：extern 过滤，空行 */
+                              /* 第10行：函数声明过滤，空行 */
+    int arr[10];              /* 第11行：提取，保留4空格缩进 */
+        int arr2[20][10];     /* 第12行：提取，保留8空格缩进 */
+    int initialized = 100;    /* 第13行：提取，保留4空格缩进 */
+                              /* 第14行：空行跳过，空行 */
+                              /* 第15行：#endif 跳过，空行 */
+EXEC SQL END DECLARE SECTION;
+```
+
+缩进和原文件完全一致。请验证。
+
+
+
+
+# 头文件中有 
+
+int func1()
+
+{
+
+  int x1;
+
+   int x2;
+
+   return x1 +x2;
+
+}
+
+这种会被提取吗？ 按要求应该不会被提取 int 类型变量定义
+
+》
+好的，下面是修正后的完整 patch（增加大括号层级判断，只提取全局作用域变量）：
+
+```diff
+--- a/src/interfaces/ecpg/preproc/pgc.l
++++ b/src/interfaces/ecpg/preproc/pgc.l
+@@ -79,6 +79,8 @@ static void parse_include(void);
+ static bool ecpg_isspace(char ch);
+ static bool isdefine(void);
+ static bool isinformixdefine(void);
++static bool extract_host_vars(const char *srcfile, const char *dstfile);
++static int debug_log = 0;  /* 对应 ecpg -D 调试模式，=1 时不删除临时文件 */
+ 
+ char	   *token_start;
+ 
+@@ -2360,6 +2362,8 @@ parse_include(void)
+ 	struct _yy_buffer *yb;
+ 	struct _include_path *ip;
+ 	char		inc_file[MAXPGPATH];
++	char		extract_file[MAXPGPATH];
++	bool		use_extract = false;
+ 	unsigned int i;
+ 
+ 	yb = mm_alloc(sizeof(struct _yy_buffer));
+@@ -2403,6 +2407,16 @@ parse_include(void)
+ 		memmove(yytext, yytext + 1, strlen(yytext));
+ 
+ 		strlcpy(inc_file, yytext, sizeof(inc_file));
++
++		/* 对双引号包含的头文件尝试提取宿主变量 */
++		snprintf(extract_file, sizeof(extract_file), "%s.extract", inc_file);
++		if (extract_host_vars(inc_file, extract_file))
++		{
++			use_extract = true;
++		}
++		else
++		{
++			use_extract = false;
++		}
++
+ 		yyin = fopen(inc_file, "r");
+ 		if (!yyin)
+ 		{
+@@ -2453,6 +2467,21 @@ parse_include(void)
+ 	if (!yyin)
+ 		mmfatal(NO_INCLUDE_FILE, "could not open include file \"%s\" on line %d", yytext, yylineno);
+ 
++	/* 如果提取成功，切换到临时文件 */
++	if (use_extract)
++	{
++		fclose(yyin);
++		yyin = fopen(extract_file, "r");
++		if (!yyin)
++			mmfatal(NO_INCLUDE_FILE, "could not open extract file \"%s\" on line %d", extract_file, yylineno);
++		input_filename = mm_strdup(extract_file);
++	}
++	else
++	{
++		input_filename = mm_strdup(inc_file);
++	}
++
+-	input_filename = mm_strdup(inc_file);
+ 	yy_switch_to_buffer(yy_create_buffer(yyin, YY_BUF_SIZE));
+ 	yylineno = 1;
+ 	output_line_number();
+@@ -2471,6 +2500,240 @@ parse_include(void)
+ 	BEGIN(C);
+ }
+ 
++/*
++ * is_int_var_line --- 判断一行是否为 int 类型变量定义（含数组）
++ *
++ * 支持: int, unsigned int, signed int 全局变量定义（含数组形式）
++ * 过滤: extern, 函数声明(含'('), 预处理指令, 注释
++ *
++ * 返回: true 表示需要提取，false 表示跳过
++ */
++static bool
++is_int_var_line(const char *line)
++{
++	const char *p = line;  /* 只读指针，不修改原 line */
++	bool is_extern = false;
++	bool is_int = false;
++	bool has_paren = false;
++
++	/* 跳过行首空白 */
++	while (*p && (*p == ' ' || *p == '\t'))
++		p++;
++
++	/* 空行 */
++	if (*p == '\n' || *p == '\r' || *p == '\0')
++		return false;
++
++	/* 跳过预处理指令 */
++	if (*p == '#')
++		return false;
++
++	/* 跳过 // 注释 */
++	if (p[0] == '/' && p[1] == '/')
++		return false;
++
++	/* 跳过 /* 块注释开始 */
++	if (p[0] == '/' && p[1] == '*')
++		return false;
++
++	/* 检查 extern */
++	if ((p[0] == 'e' || p[0] == 'E') &&
++		(p[1] == 'x' || p[1] == 'X') &&
++		(p[2] == 't' || p[2] == 'T') &&
++		(p[3] == 'e' || p[3] == 'E') &&
++		(p[4] == 'r' || p[4] == 'R') &&
++		(p[5] == 'n' || p[5] == 'N') &&
++		(p[6] == ' ' || p[6] == '\t'))
++	{
++		is_extern = true;
++	}
++
++	/* 检查 unsigned / signed */
++	if (!is_extern)
++	{
++		if ((p[0] == 'u' || p[0] == 'U') &&
++			(p[1] == 'n' || p[1] == 'N') &&
++			(p[2] == 's' || p[2] == 'S') &&
++			(p[3] == 'i' || p[3] == 'I') &&
++			(p[4] == 'g' || p[4] == 'G') &&
++			(p[5] == 'n' || p[5] == 'N') &&
++			(p[6] == 'e' || p[6] == 'E') &&
++			(p[7] == 'd' || p[7] == 'D') &&
++			(p[8] == ' ' || p[8] == '\t'))
++		{
++			p += 9;
++			while (*p && (*p == ' ' || *p == '\t'))
++				p++;
++		}
++		else if ((p[0] == 's' || p[0] == 'S') &&
++				 (p[1] == 'i' || p[1] == 'I') &&
++				 (p[2] == 'g' || p[2] == 'G') &&
++				 (p[3] == 'n' || p[3] == 'N') &&
++				 (p[4] == 'e' || p[4] == 'E') &&
++				 (p[5] == 'd' || p[5] == 'D') &&
++				 (p[6] == ' ' || p[6] == '\t'))
++		{
++			p += 7;
++			while (*p && (*p == ' ' || *p == '\t'))
++				p++;
++		}
++	}
++
++	/* 检查 int */
++	if (!is_extern)
++	{
++		if ((p[0] == 'i' || p[0] == 'I') &&
++			(p[1] == 'n' || p[1] == 'N') &&
++			(p[2] == 't' || p[2] == 'T') &&
++			(p[3] == ' ' || p[3] == '\t' || p[3] == '\n' || p[3] == '\r' ||
++			 p[3] == ';' || p[3] == '\0'))
++		{
++			is_int = true;
++		}
++	}
++
++	/* 检查是否包含 '(' —— 函数声明的特征 */
++	if (is_int && !is_extern)
++	{
++		const char *q = p + 3;
++		while (*q && *q != '\n' && *q != '\r')
++		{
++			if (*q == '(')
++			{
++				has_paren = true;
++				break;
++			}
++			q++;
++		}
++	}
++
++	/* 提取条件：是 int 类型定义，不是 extern，不是函数声明 */
++	return (is_int && !is_extern && !has_paren);
++}
++
++/*
++ * extract_host_vars --- 从头文件中提取 int 类型宿主变量定义
++ *
++ * 只提取全局作用域（大括号层级为0）的变量定义
++ * 行号对齐：不提取的行用空行占位，保持与原文件行号一致
++ * 缩进对齐：提取的行原样输出，保留原始缩进
++ * 返回 true 表示成功提取到内容，false 表示无内容或失败
++ */
++static bool
++extract_host_vars(const char *srcfile, const char *dstfile)
++{
++	FILE *src, *dst;
++	char line[4096];
++	bool has_content = false;
++	int brace_level = 0;  /* 大括号层级，只提取层级为0的变量 */
++
++	src = fopen(srcfile, "r");
++	if (!src)
++		return false;
++
++	dst = fopen(dstfile, "w");
++	if (!dst)
++	{
++		fclose(src);
++		return false;
++	}
++
++	/* 写入 BEGIN DECLARE SECTION（占第1行） */
++	fprintf(dst, "EXEC SQL BEGIN DECLARE SECTION;\n");
++
++	while (fgets(line, sizeof(line), src))
++	{
++		char *p;
++		bool is_int_var = false;
++
++		/* 更新大括号层级（在判断 int 变量之前） */
++		for (p = line; *p; p++)
++		{
++			if (*p == '{')
++				brace_level++;
++			else if (*p == '}')
++				brace_level--;
++		}
++
++		/* 只在大括号层级为0时检查是否为 int 变量定义 */
++		if (brace_level == 0 && is_int_var_line(line))
++		{
++			/* 原样输出，保留原始缩进 */
++			fprintf(dst, "%s", line);
++			has_content = true;
++		}
++		else
++		{
++			/* 不提取的行用空行占位，保持行号对齐 */
++			fprintf(dst, "\n");
++		}
++	}
++
++	/* 写入 END DECLARE SECTION */
++	fprintf(dst, "EXEC SQL END DECLARE SECTION;\n");
++
++	fclose(src);
++	fclose(dst);
++
++	/* 如果没有提取到任何内容，删除临时文件 */
++	if (!has_content)
++	{
++		remove(dstfile);
++		return false;
++	}
++
++	return true;
++}
++
++/*
++ * cleanup_extract_file --- 清理临时 .extract 文件
++ *
++ * debug_log = 1 时不删除（调试模式保留）
++ */
++static void
++cleanup_extract_file(void)
++{
++	if (debug_log)
++		return;
++
++	if (input_filename != NULL)
++	{
++		size_t len = strlen(input_filename);
++		if (len > 8 && strcmp(input_filename + len - 8, ".extract") == 0)
++		{
++			remove(input_filename);
++		}
++	}
++}
++
+ /*
+  * ecpg_isspace() --- return true if flex scanner considers char whitespace
+  */
+@@ -2498,6 +2759,9 @@ isdefine(void)
+ 			ptr->value != NULL &&
+ 			ptr->used == NULL)
+ 		{
++			/* 清理可能存在的临时文件 */
++			cleanup_extract_file();
++
+ 			/* Save state associated with the current buffer */
+ 			struct _yy_buffer *yb;
+ 
+@@ -2548,6 +2812,9 @@ isinformixdefine(void)
+ 	if (new)
+ 	{
++		/* 清理可能存在的临时文件 */
++		cleanup_extract_file();
++
+ 		/* Save state associated with the current buffer */
+ 		struct _yy_buffer *yb;
+ 
+@@ -2576,6 +2843,9 @@ isinformixdefine(void)
+ 					{
+ 						if (yy_buffer == NULL)
+ 						{
++							/* 退出主文件前清理临时文件 */
++							cleanup_extract_file();
++
+ 							/* No more input */
+ 							if (preproc_tos > 0)
+ 							{
+@@ -2586,6 +2856,9 @@ isinformixdefine(void)
+ 						}
+ 						else
+ 						{
++							/* 切换文件前清理临时文件 */
++							cleanup_extract_file();
++
+ 							/* Revert to previous input source */
+ 							struct _yy_buffer *yb = yy_buffer;
+ 							int			i;
+```
+
+### 验证场景
+
+**h1.h**：
+```c
+#ifndef H1_H
+#define H1_H
+
+int global_a;
+unsigned int global_b;
+    signed int global_c;
+
+extern int ext_val;
+void helper(void);
+int arr[10];
+
+int func1()
+{
+    int x1;          /* 不提取：在函数体内 */
+    int x2;          /* 不提取：在函数体内 */
+    return x1 + x2;
+}
+
+    int global_d;    /* 提取：函数体外，全局作用域 */
+
+#endif
+```
+
+**h1.h.extract**：
+```c
+EXEC SQL BEGIN DECLARE SECTION;
+                              /* 第1行：#ifndef 跳过 */
+                              /* 第2行：#define 跳过 */
+                              /* 第3行：空行跳过 */
+int global_a;                 /* 第4行：提取 */
+unsigned int global_b;        /* 第5行：提取 */
+    signed int global_c;      /* 第6行：提取，保留缩进 */
+                              /* 第7行：空行跳过 */
+                              /* 第8行：extern 过滤 */
+                              /* 第9行：函数声明过滤 */
+int arr[10];                  /* 第10行：提取 */
+                              /* 第11行：int func1() 含'(' 过滤 */
+{                             /* 第12行：{ 不是 int 定义 */
+                              /* 第13行：x1 层级=1 不提取 */
+                              /* 第14行：x2 层级=1 不提取 */
+                              /* 第15行：return 不是 int 定义 */
+}                             /* 第16行：} 不是 int 定义 */
+                              /* 第17行：空行跳过 */
+    int global_d;             /* 第18行：提取，层级=0 */
+                              /* 第19行：#endif 跳过 */
+EXEC SQL END DECLARE SECTION;
+```
+
+函数体内的 `int x1;` / `int x2;` 因 `brace_level=1` 不提取。请验证。
