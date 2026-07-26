@@ -315,3 +315,334 @@ gIgnoreError = true;  /* 或通过命令行参数传入 */
 ```
 
 这样，当 ECPG 预处理遇到结构体中包含不认识的类型（如第三方库定义的类型尚未被 ECPG 识别）时，会跳过该结构体定义、保留原始 C 代码、继续处理文件剩余部分，而不是直接终止。
+
+
+#2 
+
+以下是针对 PostgreSQL ECPG 预处理器的完整 patch，实现 `gIgnoreError` 控制结构体解析出错时跳过该结构体、继续后续处理。
+
+```diff
+diff --git a/src/interfaces/ecpg/preproc/preproc_extern.h b/src/interfaces/ecpg/preproc/preproc_extern.h
+index abc1234..def5678 100644
+--- a/src/interfaces/ecpg/preproc/preproc_extern.h
++++ b/src/interfaces/ecpg/preproc/preproc_extern.h
+@@ -30,7 +30,9 @@ extern bool autocommit,
+ 			system_includes,
+ 			force_indicator,
+ 			questionmarks,
+-			regression_mode,
+-			auto_prepare;
++			regression_mode,
++			auto_prepare,
++			gIgnoreError,
++			struct_parse_error;
+ extern int braces_open,
+ 			ret_value,
+ 			struct_level,
+
+diff --git a/src/interfaces/ecpg/preproc/ecpg.c b/src/interfaces/ecpg/preproc/ecpg.c
+index abc1234..def5678 100644
+--- a/src/interfaces/ecpg/preproc/ecpg.c
++++ b/src/interfaces/ecpg/preproc/ecpg.c
+@@ -20,6 +20,8 @@ bool autocommit = false,
+ 	 questionmarks = false,
+ 	 regression_mode = false,
+ 	 auto_prepare = false;
++bool gIgnoreError = false;
++bool struct_parse_error = false;
+ 
+ static const char *progname;
+ char *output_filename;
+
+diff --git a/src/interfaces/ecpg/preproc/ecpg.trailer b/src/interfaces/ecpg/preproc/ecpg.trailer
+index abc1234..def5678 100644
+--- a/src/interfaces/ecpg/preproc/ecpg.trailer
++++ b/src/interfaces/ecpg/preproc/ecpg.trailer
+@@ -500,18 +500,33 @@ var_type: simple_type
+ 	else
+ 	{
+ 		/* Otherwise, legal only if user typedef'ed it */
+-		struct typedefs *this = get_typedef("string", false);
++		struct typedefs *this = get_typedef("string", gIgnoreError && struct_level > 0);
+ 
+-		$$.type_str = (this->type->type_enum == ECPGt_varchar || this->type->type_enum == ECPGt_bytea) ? mm_strdup("") : mm_strdup(this->name);
+-		$$.type_enum = this->type->type_enum;
+-		$$.type_dimension = this->type->type_dimension;
+-		$$.type_index = this->type->type_index;
+-		if (this->type->type_sizeof && strlen(this->type->type_sizeof) != 0)
+-			$$.type_sizeof = this->type->type_sizeof;
++		if (this == NULL)
++		{
++			struct_parse_error = true;
++			$$.type_str = mm_strdup("string");
++			$$.type_enum = ECPGt_long;
++			$$.type_dimension = mm_strdup("-1");
++			$$.type_index = mm_strdup("-1");
++			$$.type_sizeof = mm_strdup("");
++			ECPGfree_struct_member(struct_member_list[struct_level]);
++			struct_member_list[struct_level] = NULL;
++		}
+ 		else
+-			$$.type_sizeof = cat_str(3, "sizeof(", this->name, ")");
+-
+-		ECPGfree_struct_member(struct_member_list[struct_level]);
+-		struct_member_list[struct_level] = ECPGstruct_member_dup(this->struct_member_list);
++		{
++			$$.type_str = (this->type->type_enum == ECPGt_varchar || this->type->type_enum == ECPGt_bytea) ? mm_strdup("") : mm_strdup(this->name);
++			$$.type_enum = this->type->type_enum;
++			$$.type_dimension = this->type->type_dimension;
++			$$.type_index = this->type->type_index;
++			if (this->type->type_sizeof && strlen(this->type->type_sizeof) != 0)
++				$$.type_sizeof = this->type->type_sizeof;
++			else
++				$$.type_sizeof = cat_str(3, "sizeof(", this->name, ")");
++
++			ECPGfree_struct_member(struct_member_list[struct_level]);
++			struct_member_list[struct_level] = ECPGstruct_member_dup(this->struct_member_list);
++		}
+ 	}
+ }
+ | enum_type
+@@ -600,18 +615,33 @@ var_type: simple_type
+ 	else
+ 	{
+ 		/* Otherwise, it must be a user-defined typedef name */
+-		struct typedefs *this = get_typedef(@1, false);
++		struct typedefs *this = get_typedef(@1, gIgnoreError && struct_level > 0);
+ 
+-		$$.type_str = (this->type->type_enum == ECPGt_varchar || this->type->type_enum == ECPGt_bytea) ? "" : this->name;
+-		$$.type_enum = this->type->type_enum;
+-		$$.type_dimension = this->type->type_dimension;
+-		$$.type_index = this->type->type_index;
+-		if (this->type->type_sizeof && strlen(this->type->type_sizeof) != 0)
+-			$$.type_sizeof = this->type->type_sizeof;
++		if (this == NULL)
++		{
++			struct_parse_error = true;
++			$$.type_str = mm_strdup(@1);
++			$$.type_enum = ECPGt_long;
++			$$.type_dimension = mm_strdup("-1");
++			$$.type_index = mm_strdup("-1");
++			$$.type_sizeof = mm_strdup("");
++			ECPGfree_struct_member(struct_member_list[struct_level]);
++			struct_member_list[struct_level] = NULL;
++		}
+ 		else
+-			$$.type_sizeof = cat_str(3, "sizeof(", this->name, ")");
+-
+-		ECPGfree_struct_member(struct_member_list[struct_level]);
+-		struct_member_list[struct_level] = ECPGstruct_member_dup(this->struct_member_list);
++		{
++			$$.type_str = (this->type->type_enum == ECPGt_varchar || this->type->type_enum == ECPGt_bytea) ? "" : this->name;
++			$$.type_enum = this->type->type_enum;
++			$$.type_dimension = this->type->type_dimension;
++			$$.type_index = this->type->type_index;
++			if (this->type->type_sizeof && strlen(this->type->type_sizeof) != 0)
++				$$.type_sizeof = this->type->type_sizeof;
++			else
++				$$.type_sizeof = cat_str(3, "sizeof(", this->name, ")");
++
++			ECPGfree_struct_member(struct_member_list[struct_level]);
++			struct_member_list[struct_level] = ECPGstruct_member_dup(this->struct_member_list);
++		}
+ 	}
+ }
+ | s_struct_union_symbol
+@@ -623,16 +653,31 @@ var_type: simple_type
+ 	/* Do we have a forward definition? */
+ 	if (!forward)
+ 	{
+-		/* No */
++		/* No */
++		this = get_typedef(name, gIgnoreError && struct_level > 0);
++		if (this == NULL)
++		{
++			struct_parse_error = true;
++			$$.type_str = mm_strdup(name);
++			$$.type_enum = ECPGt_long;
++			$$.type_dimension = mm_strdup("-1");
++			$$.type_index = mm_strdup("-1");
++			$$.type_sizeof = mm_strdup("");
++			ECPGfree_struct_member(struct_member_list[struct_level]);
++			struct_member_list[struct_level] = NULL;
++		}
++		else
++		{
++			$$.type_str = this->name;
++			$$.type_enum = this->type->type_enum;
++			$$.type_dimension = this->type->type_dimension;
++			$$.type_index = this->type->type_index;
++			$$.type_sizeof = this->type->type_sizeof;
++			ECPGfree_struct_member(struct_member_list[struct_level]);
++			struct_member_list[struct_level] = ECPGstruct_member_dup(this->struct_member_list);
++		}
+-		this = get_typedef(name, false);
+-		$$.type_str = this->name;
+-		$$.type_enum = this->type->type_enum;
+-		$$.type_dimension = this->type->type_dimension;
+-		$$.type_index = this->type->type_index;
+-		$$.type_sizeof = this->type->type_sizeof;
+-		ECPGfree_struct_member(struct_member_list[struct_level]);
+-		struct_member_list[struct_level] = ECPGstruct_member_dup(this->struct_member_list);
+ 	}
+ 	else
+ 	{
+@@ -700,6 +745,7 @@ struct_union_type_with_symbol: s_struct_union_symbol
+ 	if (struct_level >= STRUCT_DEPTH)
+ 		mmerror(PARSE_ERROR, ET_ERROR, "too many levels in nested structure/union definition");
+ 	forward_name = mm_strdup($1.symbol);
++	struct_parse_error = false;
+ }
+ '{' variable_declarations '}'
+ {
+@@ -707,35 +753,50 @@ struct_union_type_with_symbol: s_struct_union_symbol
+ 			   *this;
+ 	struct this_type su_type;
+ 
+-	ECPGfree_struct_member(struct_member_list[struct_level]);
+-	struct_member_list[struct_level] = NULL;
+-	struct_level--;
+-	if (strcmp($1.su, "struct") == 0)
+-		su_type.type_enum = ECPGt_struct;
++	if (gIgnoreError && struct_parse_error)
++	{
++		/* Skip this struct/union definition and output raw text */
++		ECPGfree_struct_member(struct_member_list[struct_level]);
++		struct_member_list[struct_level] = NULL;
++		struct_level--;
++		free(forward_name);
++		forward_name = NULL;
++		struct_parse_error = false;
++
++		@$ = cat_str(4, cat2_str($1.su, $1.symbol), "{", @4, "}");
++	}
+ 	else
+-		su_type.type_enum = ECPGt_union;
+-	su_type.type_str = cat2_str($1.su, $1.symbol);
+-	free(forward_name);
+-	forward_name = NULL;
++	{
++		ECPGfree_struct_member(struct_member_list[struct_level]);
++		struct_member_list[struct_level] = NULL;
++		struct_level--;
++		if (strcmp($1.su, "struct") == 0)
++			su_type.type_enum = ECPGt_struct;
++		else
++			su_type.type_enum = ECPGt_union;
++		su_type.type_str = cat2_str($1.su, $1.symbol);
++		free(forward_name);
++		forward_name = NULL;
+ 
+-	/*
+-	 * This is essentially a typedef but needs the keyword struct/union as
+-	 * well. So we create the typedef for each struct definition with
+-	 * symbol
+-	 */
+-	for (ptr = types; ptr != NULL; ptr = ptr->next)
+-	{
+-		if (strcmp(su_type.type_str, ptr->name) == 0)
+-			/* re-definition is a bug */
+-			mmerror(PARSE_ERROR, ET_ERROR, "type \"%s\" is already defined", su_type.type_str);
+-	}
++		/*
++		 * This is essentially a typedef but needs the keyword struct/union as
++		 * well. So we create the typedef for each struct definition with
++		 * symbol
++		 */
++		for (ptr = types; ptr != NULL; ptr = ptr->next)
++		{
++			if (strcmp(su_type.type_str, ptr->name) == 0)
++				/* re-definition is a bug */
++				mmerror(PARSE_ERROR, ET_ERROR, "type \"%s\" is already defined", su_type.type_str);
++		}
+ 
+-	this = (struct typedefs *) mm_alloc(sizeof(struct typedefs));
++		this = (struct typedefs *) mm_alloc(sizeof(struct typedefs));
+ 
+-	/* initial definition */
+-	this->next = types;
+-	this->name = mm_strdup(su_type.type_str);
+-	this->brace_level = braces_open;
+-	this->type = (struct this_type *) mm_alloc(sizeof(struct this_type));
+-	this->type->type_storage = NULL;
+-	this->type->type_enum = su_type.type_enum;
+-	this->type->type_str = mm_strdup(su_type.type_str);
+-	this->type->type_dimension = mm_strdup("-1");	/* dimension of array */
+-	this->type->type_index = mm_strdup("-1");	/* length of string */
+-	this->type->type_sizeof = ECPGstruct_sizeof ? mm_strdup(ECPGstruct_sizeof) : NULL;
+-	this->struct_member_list = ECPGstruct_member_dup(struct_member_list[struct_level]);
++		/* initial definition */
++		this->next = types;
++		this->name = mm_strdup(su_type.type_str);
++		this->brace_level = braces_open;
++		this->type = (struct this_type *) mm_alloc(sizeof(struct this_type));
++		this->type->type_storage = NULL;
++		this->type->type_enum = su_type.type_enum;
++		this->type->type_str = mm_strdup(su_type.type_str);
++		this->type->type_dimension = mm_strdup("-1");	/* dimension of array */
++		this->type->type_index = mm_strdup("-1");	/* length of string */
++		this->type->type_sizeof = ECPGstruct_sizeof ? mm_strdup(ECPGstruct_sizeof) : NULL;
++		this->struct_member_list = ECPGstruct_member_dup(struct_member_list[struct_level]);
+ 
+-	types = this;
+-	@$ = cat_str(4, su_type.type_str, "{", @4, "}");
++		types = this;
++		@$ = cat_str(4, su_type.type_str, "{", @4, "}");
++	}
+ }
+ ;
+ 
+@@ -745,14 +806,25 @@ struct_union_type: struct_union_type_with_symbol
+ 	ECPGfree_struct_member(struct_member_list[struct_level]);
+ 	struct_member_list[struct_level++] = NULL;
+ 	if (struct_level >= STRUCT_DEPTH)
+ 		mmerror(PARSE_ERROR, ET_ERROR, "too many levels in nested structure/union definition");
++	struct_parse_error = false;
+ }
+ '{' variable_declarations '}'
+ {
+-	ECPGfree_struct_member(struct_member_list[struct_level]);
+-	struct_member_list[struct_level] = NULL;
+-	struct_level--;
+-	@$ = cat_str(4, @1, "{", @4, "}");
++	if (gIgnoreError && struct_parse_error)
++	{
++		ECPGfree_struct_member(struct_member_list[struct_level]);
++		struct_member_list[struct_level] = NULL;
++		struct_level--;
++		struct_parse_error = false;
++		@$ = cat_str(4, @1, "{", @4, "}");
++	}
++	else
++	{
++		ECPGfree_struct_member(struct_member_list[struct_level]);
++		struct_member_list[struct_level] = NULL;
++		struct_level--;
++		@$ = cat_str(4, @1, "{", @4, "}");
++	}
+ }
+ ;
+```
+
+---
+
+### Patch 说明
+
+| 修改点 | 作用 |
+|--------|------|
+| **`preproc_extern.h`** | 声明 `gIgnoreError`（全局开关）和 `struct_parse_error`（当前结构体解析错误标记）。 |
+| **`ecpg.c`** | 定义并初始化两个全局变量。`gIgnoreError` 默认 `false`，保持原有行为；可在 `main()` 中通过命令行参数或外部逻辑置为 `true`。 |
+| **`ecpg.trailer`** |  |
+| ├─ `STRING_P` / `IDENT` / `s_struct_union_symbol` 分支 | 将 `get_typedef(..., false)` 改为 `get_typedef(..., gIgnoreError && struct_level > 0)`。当在结构体内部且 `gIgnoreError` 开启时，类型未找到不再调用 `mmfatal`，而是返回 `NULL`，随后设置 `struct_parse_error = true`，并填充 dummy 类型（`ECPGt_long`）让解析器继续扫描到结构体结束。 |
+| ├─ `struct_union_type_with_symbol` | 进入结构体时重置 `struct_parse_error = false`；在结构体定义结束时检查错误标志。若出错，**不注册 typedef**、**不保留成员列表**，直接输出原始结构体文本（`struct XXX { ... }`），然后继续后续解析。 |
+| └─ `struct_union_type`（匿名结构体） | 同理，出错时清理状态、输出原始文本、继续后续解析。 |
+
+### 使用方式
+
+在调用 `ecpg` 的代码中（或修改 `ecpg.c` 的 `main()` 加入命令行选项），将 `gIgnoreError` 设为 `true`：
+
+```c
+gIgnoreError = true;
+```
+
+当预处理遇到结构体中包含 ECPG 不认识的类型（如某些第三方库自定义类型）时，会**跳过该结构体**（保留原始 C 代码到输出文件），**不终止进程**，继续处理文件剩余内容。
