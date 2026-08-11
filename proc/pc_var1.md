@@ -632,3 +632,139 @@ EDB 在 scanner 中直接识别 `VARCHAR` 关键字（即使在 `<C>` 模式下�
 
 > **EDB 的实现是"侵入式原生支持"：在 ECPG scanner/parser 中直接嵌入 C 语法识别和分层符号表，实现完整的 Pro*C 作用域语义（含块级遮蔽），但耦合度高、维护成本高。你们的方案是"非侵入式外围模拟"：通过外部提取器+行号反查，在不动 ECPG 核心 scanner 的前提下实现函数级作用域隔离，架构解耦、升级友好，但牺牲了块级遮蔽能力，且需要两遍扫描。两种方案没有绝对优劣，EDB 追求 Pro*C 的 100% 语义兼容，你们追求在现有资产上的最小代价落地。**
 
+# 问题varchar  这个在声明块中原生支持。
+
+块级变量遮蔽 ：： 这种使用的概率很小，即使有，也可以通过改写pc文件中代码的方式较快改成支持的形式。
+另外，假如要实现 块级变量遮蔽， 那么现在变量有了函数名做辅助，还以使用 所在的行号来进行标识
+# 回复
+
+你的判断完全正确。**块级变量遮蔽在真实业务代码中极少出现**，而且 Pro*C 的 `EXEC SQL` 通常位于函数逻辑的中上层，很少嵌套在深层 `if/for/while` 块内声明宿主变量。为了这种极端场景引入复杂的状态机，ROI 确实很低。
+
+而你说到的**"用行号进一步标识"**，本质上是一种**轻量级的块级作用域模拟**，不需要理解 C 的块嵌套语法，只需要在符号表里记录**变量的有效行号区间**。
+
+---
+
+## 一、行号标识块级作用域的原理
+
+### 核心洞察
+C 语言中，局部变量的**生命周期就是其所在块的大括号区间**。如果符号表记录每个变量的：
+- `decl_line`：声明所在行
+- `scope_end_line`：该变量所在块的 `}` 所在行
+
+那么查找时，只要判断**当前 SQL 语句的行号是否落在 `[decl_line, scope_end_line]` 区间内**，就能精确匹配"当前可见"的变量。
+
+### 示例
+```c
+void foo(void) {
+    int x = 1;              /* line 2, scope [2, 10] */
+    
+    if (1) {
+        int x = 2;          /* line 5, scope [5, 7] */
+        EXEC SQL INTO :x;   /* line 6, current_line=6 */
+    }                       /* line 7 */
+    
+    EXEC SQL INTO :x;       /* line 9, current_line=9 */
+}                           /* line 10 */
+```
+
+查找逻辑：
+- `line 6`：匹配 `x`，有两个候选：
+  - `x@[2,10]`：包含 6 ✅
+  - `x@[5,7]`：包含 6 ✅，且 `decl_line=5` 更大（更内层）→ **优先选这个**
+- `line 9`：匹配 `x`，只有一个候选：
+  - `x@[2,10]`：包含 9 ✅
+  - `x@[5,7]`：不包含 9 ❌
+
+---
+
+## 二、具体设计方案（不修改代码）
+
+### 1. 符号表扩展
+
+```c
+struct variable {
+    char       *name;
+    enum ECPGttype type;
+    char       *scope;          /* 函数名，NULL=全局 */
+    int         decl_line;      /* 声明行号 */
+    int         scope_end_line; /* 作用域结束行号（块的 } 所在行） */
+    struct variable *next;
+};
+```
+
+### 2. 提取器增强
+
+提取器在生成 `xx.pc.extract` 和 `pc_func_list` 时，额外做一件事：
+- 维护一个**大括号深度栈**
+- 在每个 `{` 处记录当前行号
+- 在每个 `}` 处，将所有在该深度声明的变量的 `scope_end_line` 设为当前行号
+
+> 注意：这里不需要知道块是 `if`、`for` 还是普通复合语句，只需要知道**大括号配对**即可。
+
+### 3. 查找逻辑改造
+
+```c
+struct variable *find_hostvar(const char *name, int current_line)
+{
+    struct variable *v, *best = NULL;
+    char *current_func = NULL;
+    
+    /* 先确定当前函数（行号反查 pc_func_list） */
+    pc_func *f = find_func_by_lineno(pc_func_list, current_line);
+    if (f) current_func = f->func_name;
+    
+    /* 查找最佳匹配：同名 + 同函数（或全局）+ 行号落在作用域内 + decl_line 最大（最内层） */
+    for (v = varlist; v; v = v->next) {
+        if (strcmp(v->name, name) != 0) continue;
+        
+        /* 函数作用域匹配 */
+        if (current_func) {
+            if (v->scope && strcmp(v->scope, current_func) != 0) continue;
+        } else {
+            if (v->scope != NULL) continue; /* 全局 SQL 只能匹配全局变量 */
+        }
+        
+        /* 行号区间匹配 */
+        if (current_line < v->decl_line || current_line > v->scope_end_line)
+            continue;
+        
+        /* 取最内层（decl_line 最大） */
+        if (best == NULL || v->decl_line > best->decl_line)
+            best = v;
+    }
+    
+    return best;
+}
+```
+
+---
+
+## 三、为什么现在不需要做
+
+| 维度 | 函数级作用域（当前方案） | 行号块级作用域（进阶方案） |
+|---|---|---|
+| **实现复杂度** | 低：只需识别函数 `{}` 区间 | 中：需要识别所有 `{}` 块区间，处理嵌套 |
+| **提取器工作量** | 只需构建 `pc_func_list` | 需要维护大括号深度栈，记录每个变量的 `scope_end_line` |
+| **符号表改动** | 加 `scope` 字段 | 再加 `decl_line`、`scope_end_line` |
+| **真实需求频率** | 覆盖 95%+ 场景 | 覆盖剩余 5% 中的极端情况 |
+| **规避成本** | 同名局部变量改个名即可 | — |
+
+**结论**：块级遮蔽可以通过**编码规范**规避（"同一函数内宿主变量不要同名"），即使出现也可以手动改写 `.pc` 文件。行号区间方案虽然可行，但当前阶段**过度设计**。
+
+---
+
+## 四、未来扩展路径
+
+如果后续确实需要块级遮蔽，可以在当前方案上**平滑升级**：
+
+1. **Phase 1（当前）**：`scope` = 函数名，实现函数级隔离
+2. **Phase 2（未来）**：在 `scope` 基础上增加 `decl_line` + `scope_end_line`，查找时加行号区间判断
+
+两套逻辑完全兼容：Phase 2 只是让查找更精确，Phase 1 注册的变量（`scope_end_line` 设为函数结束行）在 Phase 2 依然有效。
+
+---
+
+## 一句话总结
+
+> **你的判断是对的：块级遮蔽概率极低，不值得当前投入。而"用行号区间标识作用域"在设计上完全可行——符号表增加 `decl_line` 和 `scope_end_line`，查找时匹配"当前行号落在变量声明区间内"并取 `decl_line` 最大（最内层）的变量。这套方案可以作为 Phase 2 的预留扩展，现在先用函数级 `scope` 跑通主干即可。**
+
