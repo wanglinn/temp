@@ -768,3 +768,272 @@ struct variable *find_hostvar(const char *name, int current_line)
 
 > **你的判断是对的：块级遮蔽概率极低，不值得当前投入。而"用行号区间标识作用域"在设计上完全可行——符号表增加 `decl_line` 和 `scope_end_line`，查找时匹配"当前行号落在变量声明区间内"并取 `decl_line` 最大（最内层）的变量。这套方案可以作为 Phase 2 的预留扩展，现在先用函数级 `scope` 跑通主干即可。**
 
+
+# 设计方案总结 
+
+以下是 **ECPG Pro*C 兼容模式（`-C PROC`）** 的完整设计方案，用于实现**宿主变量无需强制声明在 `BEGIN/END DECLARE SECTION`** 中。本方案基于现有资产（头文件提取器），采用**非侵入式架构**，不改造 ECPG 核心 scanner/parser 的 C 语法识别逻辑。
+
+---
+
+## 一、设计目标
+
+| 目标 | 说明 |
+|---|---|
+| **核心能力** | 允许 `.pc` 文件中的 C 全局变量、函数参数、局部变量直接作为 `EXEC SQL` 中的宿主变量使用 |
+| **兼容策略** | 与现有 `BEGIN/END DECLARE SECTION` 机制并存，默认关闭，通过 `-C PROC` 激活 |
+| **作用域精度** | **函数级**：同名变量在不同函数中互不干扰；同一函数内同名变量需开发者规避 |
+| **非侵入原则** | ECPG 核心 scanner 不识别 C 函数语法，通过外部提取器 + 行号反查实现作用域隔离 |
+
+---
+
+## 二、总体架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     原始 xx.pc 文件                          │
+│  ┌──────────────┐  ┌──────────────────┐  ┌──────────────┐  │
+│  │ 全局变量声明  │  │ 函数A / 函数B ... │  │ EXEC SQL ... │  │
+│  └──────────────┘  └──────────────────┘  └──────────────┘  │
+└────────────────────┬──────────────────────────────────────┘
+                     │
+                     ▼
+            ┌─────────────────┐
+            │   提取器（Extractor）│
+            │  （独立预处理工具）  │
+            └─────────────────┘
+                     │
+         ┌───────────┴───────────┐
+         ▼                       ▼
+  ┌──────────────┐      ┌─────────────────┐
+  │ pc_func_list │      │ xx.pc.extract   │
+  │ (函数区间表)  │      │ (行号对齐临时文件) │
+  └──────────────┘      └─────────────────┘
+         │                       │
+         │         ┌─────────────┘
+         │         ▼
+         │  ┌─────────────────┐
+         │  │ ECPG 扫描临时文件 │◄── 仅用于注册宿主变量
+         │  │  (BEGIN/END      │    识别变量声明，按行号查 pc_func_list
+         │  │   DECLARE SECTION)│    注册到符号表（带 scope=函数名/NULL）
+         │  └─────────────────┘
+         │
+         └──────────────┐
+                        ▼
+              ┌─────────────────┐
+              │ ECPG 扫描原始文件 │◄── 正常解析 EXEC SQL 语句
+              │   xx.pc          │    遇到 :var 时，用 yylineno 反查
+              └─────────────────┘    pc_func_list → current_func
+                                       → 符号表按 (name, scope) 查找
+```
+
+---
+
+## 三、关键组件
+
+### 3.1 提取器（Extractor）
+
+**职责**：在 ECPG 正式扫描前，对 `.pc` 文件做两遍预处理。
+
+| 阶段 | 动作 | 输出 |
+|---|---|---|
+| **第一遍：函数识别** | 正则扫描函数定义头（`返回类型 函数名(参数) {`），维护大括号嵌套深度，记录 `{` 和匹配 `}` 的行号 | `pc_func_list` |
+| **第二遍：语句提取** | 识别可作为宿主变量的声明语句（变量定义、`typedef`、结构体定义等），复制到临时文件；非提取行用**空行占位** | `xx.pc.extract` |
+
+**提取内容**：
+- 全局变量声明：`int g_count;`
+- 函数参数列表（随函数定义一起提取）
+- 局部变量声明：`int local_var;`
+- `typedef` 别名、结构体定义（如果成员是基础类型）
+- `#ifdef`、 `#define` 等条件编译语句（保持结构完整）
+
+**不提取内容**：
+- 纯表达式语句（`x = 1;`）
+- 函数调用、控制流语句
+- 头文件包含语句（`#include` 指向的头文件由现有头文件提取机制独立处理）
+
+### 3.2 临时文件（`xx.pc.extract`）
+
+**格式要求**：
+- 与原始 `xx.pc` **行号严格对齐**：不提取的行用空行（`\n`）占位
+- 前后自动包裹 `EXEC SQL BEGIN DECLARE SECTION` 和 `EXEC SQL END DECLARE SECTION`
+- 使 ECPG 的 `yylineno` 在扫描临时文件时，与扫描原始文件的行号**一一对应**
+
+**示例**：
+
+```c
+/* 原始 xx.pc */
+ 1:  #include "common.h"
+ 2:  
+ 3:  int g_id;                    /* ← 提取 */
+ 4:  
+ 5:  void foo(int p_empno)        /* ← 提取函数头 */
+ 6:  {                            /* ← 提取 */
+ 7:      int local_sal;           /* ← 提取 */
+ 8:      printf("start");         /* ← 不提取，空行占位 */
+ 9:      EXEC SQL SELECT ...;
+10:  }
+
+/* 生成的 xx.pc.extract */
+ 1:  
+ 2:  
+ 3:  int g_id;
+ 4:  
+ 5:  void foo(int p_empno)
+ 6:  {
+ 7:      int local_sal;
+ 8:  
+ 9:  
+10:  
+EXEC SQL BEGIN DECLARE SECTION
+/* ... 提取内容 ... */
+EXEC SQL END DECLARE SECTION
+```
+
+### 3.3 函数区间表（`pc_func_list`）
+
+**数据结构**：
+
+```c
+typedef struct pc_func {
+    char       *func_name;      /* 函数名 */
+    int         start_line;     /* 函数体 { 所在行号 */
+    int         end_line;       /* 匹配 } 所在行号 */
+    struct pc_func *next;
+} pc_func;
+```
+
+**构建规则**：
+- 只识别**带函数体的定义**（必须有 `{`）
+- 识别模式：`返回类型 标识符 ( 参数列表 ) {`
+- 排除结构体/联合体定义（`struct X {` 不记录）
+- 排除函数指针变量、纯函数声明（无 `{`）
+- 仅记录当前 `.pc` 文件内的函数，不处理 `#include` 头文件
+
+**查找算法**：
+
+```c
+pc_func *find_func_by_lineno(pc_func *list, int lineno)
+{
+    for (pc_func *f = list; f; f = f->next)
+        if (lineno >= f->start_line && lineno <= f->end_line)
+            return f;
+    return NULL;  /* 全局作用域 */
+}
+```
+
+### 3.4 ECPG 符号表扩展
+
+**扩展 `struct variable`**：
+
+```c
+struct variable {
+    char       *name;
+    enum ECPGttype type;
+    char       *type_str;
+    char       *type_dimension;
+    char       *type_index;
+    char       *type_sizeof;
+    char       *type_storage;
+    
+    /* 新增字段 */
+    char       *scope;          /* NULL = 全局作用域, "foo" = 函数 foo 内 */
+    
+    struct variable *next;
+};
+```
+
+**注册流程**（扫描 `xx.pc.extract` 时）：
+1. ECPG 正常解析 `BEGIN/END DECLARE SECTION` 内的变量声明
+2. 注册变量时，根据当前 `yylineno` 调用 `find_func_by_lineno()`
+3. 若命中函数区间，`scope = mm_strdup(func_name)`
+4. 若未命中，`scope = NULL`（全局）
+
+### 3.5 宿主变量查找逻辑
+
+**改造 `find_variable` 为 `find_hostvar`**：
+
+```c
+struct variable *find_hostvar(const char *name, int lineno)
+{
+    struct variable *v;
+    struct variable *global_match = NULL;
+    struct variable *func_match = NULL;
+    pc_func *f = find_func_by_lineno(pc_func_list, lineno);
+    char *current_func = f ? f->func_name : NULL;
+    
+    for (v = varlist; v; v = v->next) {
+        if (strcmp(v->name, name) != 0)
+            continue;
+        
+        if (v->scope == NULL) {
+            /* 全局变量，先记录，作为兜底 */
+            if (global_match == NULL)
+                global_match = v;
+        } else if (current_func && strcmp(v->scope, current_func) == 0) {
+            /* 同函数的局部变量，优先匹配 */
+            func_match = v;
+            break;  /* 函数内同名变量唯一，直接返回 */
+        }
+    }
+    
+    return func_match ? func_match : global_match;
+}
+```
+
+**调用时机**：ECPG 解析原始 `xx.pc` 中的 `EXEC SQL ... :var` 时，传入当前 `yylineno`。
+
+---
+
+## 四、与现有机制的兼容策略
+
+| 场景 | 行为 |
+|---|---|
+| **关闭 `-C PROC`（默认）** | 不启动提取器，不生成临时文件，行为与原生 ECPG 完全一致 |
+| **开启 `-C PROC`** | 启动提取器，同时保留 `BEGIN/END DECLARE SECTION` 的原有功能 |
+| **变量在 DECLARE SECTION 中声明** | 注册为 `scope=NULL`，作为全局可见变量，兼容现有逻辑 |
+| **变量在 C 代码中声明** | 提取到临时文件，注册为 `scope=函数名`（或 `NULL`） |
+| **同名变量：DECLARE SECTION + C 代码** | 优先匹配当前函数的局部变量，其次匹配全局变量（含 DECLARE SECTION 中的） |
+| **不同函数同名局部变量** | 通过 `scope` 隔离，互不干扰 |
+| **同一函数内同名变量** | 不支持遮蔽，后注册的覆盖先注册的（或报错），需开发者规避 |
+
+---
+
+## 五、边界场景处理策略
+
+| 场景 | 策略 |
+|---|---|
+| **宏定义（`#define`）** | 不支持宏展开。提取器按原始文本处理，`#define` 语句原样提取到临时文件，变量使用处保持原样 |
+| **函数指针/复杂声明** | 函数定义必须带 `{` 才记录到 `pc_func_list`。函数指针变量声明（无 `{`）不会被误识别为函数定义，即使误识别也不影响正确性 |
+| **C++ 特性（类、模板、内联）** | 第一阶段仅支持 C 风格函数定义。C++ 成员函数、模板函数暂不处理，后续按需扩展 |
+| **头文件（`#include`）** | `.pc` 文件中的头文件由**现有头文件提取机制**独立处理（生成 `xx.h.extract`），不纳入 `pc_func_list` 和 `.pc` 提取流程 |
+| **结构体定义在函数内** | 提取器会提取结构体定义到临时文件，ECPG 注册后可用于该函数内的宿主变量声明 |
+| **静态变量（`static`）** | 与自动变量同等处理，按所在函数/全局记录 `scope` |
+
+---
+
+## 六、实施阶段
+
+| 阶段 | 目标 | 工作量 |
+|---|---|---|
+| **Phase 1：基础设施** | 实现提取器原型：识别 C 函数定义（返回类型+函数名+`{`），构建 `pc_func_list`；生成行号对齐的 `xx.pc.extract` | 中 |
+| **Phase 2：变量注册** | ECPG 扩展 `struct variable` 加 `scope`；扫描临时文件注册变量时附加函数名；改造 `find_variable` 支持按行号反查 | 中 |
+| **Phase 3：集成联调** | 整合提取器到 ECPG 编译流程（`proc` 命令加 `-C PROC` 选项）；联调全局变量、函数参数、局部变量的绑定；修复行号对齐、类型映射等边界问题 | 中高 |
+| **Phase 4：优化加固** | 支持数组、指针、结构体成员访问；完善错误提示（如"当前函数内未找到宿主变量"）；性能优化（`pc_func_list` 改为有序数组+二分查找） | 低 |
+
+---
+
+## 七、关键设计决策
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| **侵入式 vs 非侵入式** | 非侵入式（提取器外围处理） | 复用现有头文件提取资产，ECPG 核心改动小，升级维护成本低 |
+| **作用域粒度** | 函数级（暂不支持块级） | 覆盖 95%+ 真实场景，块级遮蔽可通过编码规范规避 |
+| **行号对齐方式** | 空行占位 | 简单可靠，保证 `yylineno` 一一对应，无需改造 ECPG 行号计算逻辑 |
+| **临时文件生命周期** | 编译期临时生成，编译后删除 | 中间产物，不污染源码目录 |
+| **宏展开** | 不支持 | 使用场景少，预编译后生成的 `.c` 中宏保持原样 |
+
+---
+
+## 八、一句话总结
+
+> **本方案通过"外部提取器 + 行号对齐临时文件 + 函数区间表"的三层架构，在不改造 ECPG 核心 C 语法扫描能力的前提下，实现 Pro*C 式的"随处声明宿主变量"功能。提取器负责离线识别函数边界和变量声明，ECPG 通过扩展符号表的 `scope` 字段和行号反查机制，完成函数级作用域隔离。默认关闭保证向后兼容，`-C PROC` 开启后与传统 `DECLARE SECTION` 机制并存。**
